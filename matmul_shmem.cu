@@ -8,10 +8,10 @@
 
 #include <stdio.h>
 #include <assert.h>
+#include "matmul_test.h"
 
 inline
-cudaError_t checkCuda(cudaError_t res)
-{
+cudaError_t checkCuda(cudaError_t res) {
 #if defined(DEBUG) || defined(_DEBUG)
     if (res != cudaSuccess) {
         fprintf(stderr, "CUDA error %s.\n", cudaGetErrorString(res));
@@ -21,24 +21,13 @@ cudaError_t checkCuda(cudaError_t res)
     return res;
 }
 
-inline
-void *checkAlloc(void * res)
-{
-    if (res == NULL) {
-        fprintf(stderr, "Allocation error.\n");
-        assert(res != NULL);
-    }
-    return res;
-}
-
 template<int TILE_DIM, int BLOCK_ROWS, typename DT, typename DT_ACC>
 __global__
 void matmul_shmem_2_kernel(
     const DT *A,
     const DT *B,
     DT *C,
-    int M)
-{
+    int M) {
     int offset_a = blockIdx.y * TILE_DIM * M;
     int offset_b = blockIdx.x * TILE_DIM;
     DT_ACC vals_c[TILE_DIM / BLOCK_ROWS];
@@ -116,8 +105,7 @@ void matmul_shmem_3_kernel(
     const DT *A,
     const DT *B,
     DT *C,
-    int M)
-{
+    int M) {
     int offset_a = blockIdx.y * TILE_DIM * M;
     int offset_b = blockIdx.x * TILE_DIM;
     DT_ACC vals_c[TILE_DIM / BLOCK_ROWS];
@@ -194,61 +182,29 @@ void matmul_shmem_3(
         M); // Currently square matrices.
 }
 
-// TODO: make a test class, using the vector to array guarantee in C++.
-void fillMatrix(float *A, float val, int height, int width)
-{
-    for (int i = 0; i < width * height; ++i) {
-        A[i] = val;
-    }
-}
-
-void fillMatrixRow(float *A, float val, int row, int width)
-{
-    for (int i = 0; i < width; ++i) {
-        A[row * width + i] = val;
-    }
-}
-
-void fillMatrixCol(float *A, float val, int col, int height, int width)
-{
-    for (int i = 0; i < height; ++i) {
-        A[i * width + col] = val;
-    }
-}
-
-void printMatrix(const float *A, int height, int width)
-{
-    for (int i = 0; i < height; ++i) {
-        for (int j = 0; j < width; ++j) {
-            printf("%2.2f ", A[i * width + j]);
-        }
-        printf("\n");
-    }
-}
-
-int main(void)
-{
-    const int M = 16384; // Must be multiple of TILE_DIM; currently square matrices.
-    const int N = 16384;
-    const int K = 16384;
+int main(void) {
+    const int M = 16384; // Is multiple of TILE_DIM; currently square matrices.
     const int TILE_DIM = 64; // 64 is optimal for A100 and likely L4.
     const int BLOCK_ROWS = 2; // 2 is optimal for A100 and likely L4.
-    const int num_reps = 10;
-
-    float *A_h, *B_h, *C_h;
+    const int num_reps_corr = 10;
+    const int num_reps_perf = 10;
     float *A, *B, *C;
-    const int mem_size = M * N * sizeof(float);
-    A_h = (float *)checkAlloc(malloc(mem_size));
-    B_h = (float *)checkAlloc(malloc(mem_size));
-    C_h = (float *)checkAlloc(malloc(mem_size));
-    checkCuda(cudaMalloc(&A, mem_size));
-    checkCuda(cudaMalloc(&B, mem_size));
-    checkCuda(cudaMalloc(&C, mem_size));
 
+    matmul_test::MatmulTestSquare<float> mt_32(1024, 32, -1.0f, 1.0f);
+    matmul_test::MatmulTestSquare<float> mt_64(1024, 64, -1.0f, 1.0f);
+    matmul_test::MatmulTestSquare<float> mt(M, TILE_DIM, -1.0f, 1.0f);
+
+    // mem_size_corr must be less or equal to mem_size_perf.
+    const int mem_size_corr = 1024 * 1024 * sizeof(float);
+    const int mem_size_perf = mt.GetMatDimMax().m * mt.GetMatDimMax().m * sizeof(float);
+    checkCuda(cudaMalloc(&A, mem_size_perf));
+    checkCuda(cudaMalloc(&B, mem_size_perf));
+    checkCuda(cudaMalloc(&C, mem_size_perf));
+
+    float ms = 0.0f;
     cudaEvent_t start, stop;
     checkCuda(cudaEventCreate(&start));
     checkCuda(cudaEventCreate(&stop));
-    float ms = 0.0f;
 
     const int devId = 0;
     cudaDeviceProp prop;
@@ -259,48 +215,86 @@ int main(void)
     printf("\nmaxThreadsPerBlock: %d\n", prop.maxThreadsPerBlock);
     printf("\nmaxThreadsDim: %d, %d, %d\n", prop.maxThreadsDim[0], prop.maxThreadsDim[1],
            prop.maxThreadsDim[2]);
-    printf("\nRequired sharedMemPerBlock: %lu\n", (TILE_DIM * TILE_DIM + TILE_DIM * (TILE_DIM + 1)) *
-           sizeof(float));
+    printf("\nRequired sharedMemPerBlock: %lu\n",
+           (TILE_DIM * TILE_DIM + TILE_DIM * (TILE_DIM + 1)) * sizeof(float));
     checkCuda(cudaSetDevice(devId));
 
-    fillMatrix(A_h, 10.0f, M, N);
-    fillMatrix(B_h, 0.1f, M, N);
-    checkCuda(cudaMemcpy(A, A_h, mem_size, cudaMemcpyHostToDevice));
-    checkCuda(cudaMemcpy(B, B_h, mem_size, cudaMemcpyHostToDevice));
+    printf("\n\n%-30s", "matmul_shmem_2_kernel, correctness");
+    bool res = true;
+    checkCuda(cudaMemcpy(A, mt_32.GetA(), mem_size_corr, cudaMemcpyHostToDevice));
+    checkCuda(cudaMemcpy(B, mt_32.GetB(), mem_size_corr, cudaMemcpyHostToDevice));
+    for (int i = 0; i < num_reps_corr; ++i) {
+        checkCuda(cudaMemset(C, 0, mem_size_corr));
+        matmul_test::MatDim dim = mt_32.GetMatDim();
+        matmul_shmem_2<32, BLOCK_ROWS, float, float>(A, B, C, dim.m, dim.n, dim.k);
+        checkCuda(cudaMemcpy(mt_32.GetC(), C, mem_size_corr, cudaMemcpyDeviceToHost));
+        res = res && mt_32.IsCorrect(mt_32.GetC(), dim, 0.001f);
+    }
+    checkCuda(cudaMemcpy(A, mt_64.GetA(), mem_size_corr, cudaMemcpyHostToDevice));
+    checkCuda(cudaMemcpy(B, mt_64.GetB(), mem_size_corr, cudaMemcpyHostToDevice));
+    for (int i = 0; i < num_reps_corr; ++i) {
+        checkCuda(cudaMemset(C, 0, mem_size_corr));
+        matmul_test::MatDim dim = mt_64.GetMatDim();
+        matmul_shmem_2<64, BLOCK_ROWS, float, float>(A, B, C, dim.m, dim.n, dim.k);
+        checkCuda(cudaMemcpy(mt_64.GetC(), C, mem_size_corr, cudaMemcpyDeviceToHost));
+        res = res && mt_64.IsCorrect(mt_64.GetC(), dim, 0.001f);
+    }
+    if (res) {
+        printf("\npassed\n");
+    } else {
+        printf("\nfailed\n");
+    }
 
-    printf("\n\n%-30s", "matmul_shmem_2_kernel [TFLOPS]");
-    checkCuda(cudaMemset(C, 0, mem_size));
-    matmul_shmem_2<TILE_DIM, BLOCK_ROWS, float, float>(A, B, C, M, N, K);
+    printf("\n\n%-30s", "matmul_shmem_2_kernel, [TFLOPS]");
+    matmul_test::MatDim dim = mt.GetMatDimMax();
+    matmul_shmem_2<TILE_DIM, BLOCK_ROWS, float, float>(A, B, C, dim.m, dim.n, dim.k);
     checkCuda(cudaEventRecord(start, 0));
-    for (int i = 0; i < num_reps; ++i) {
-        matmul_shmem_2<TILE_DIM, BLOCK_ROWS, float, float>(A, B, C, M, N, K);
+    for (int i = 0; i < num_reps_perf; ++i) {
+        matmul_shmem_2<TILE_DIM, BLOCK_ROWS, float, float>(A, B, C, dim.m, dim.n, dim.k);
     }
     checkCuda(cudaEventRecord(stop, 0));
     checkCuda(cudaEventSynchronize(stop));
     checkCuda(cudaEventElapsedTime(&ms, start, stop));
-    printf("\n%.2f\n", 2 * M * N * 1e-9 * K * num_reps / ms);
-    checkCuda(cudaMemcpy(C_h, C, mem_size, cudaMemcpyDeviceToHost));
-//    printMatrix(C_h, M, N);
-//    printf("\n");
+    printf("\n%.2f\n", 2 * dim.m * dim.n * 1e-9 * dim.k * num_reps_perf / ms);
 
-    printf("\n\n%-30s", "matmul_shmem_3_kernel [TFLOPS]");
-    checkCuda(cudaMemset(C, 0, mem_size));
-    matmul_shmem_3<TILE_DIM, BLOCK_ROWS, float, float>(A, B, C, M, N, K);
+    printf("\n\n%-30s", "matmul_shmem_3_kernel, correctness");
+    res = true;
+    checkCuda(cudaMemcpy(A, mt_32.GetA(), mem_size_corr, cudaMemcpyHostToDevice));
+    checkCuda(cudaMemcpy(B, mt_32.GetB(), mem_size_corr, cudaMemcpyHostToDevice));
+    for (int i = 0; i < num_reps_corr; ++i) {
+        checkCuda(cudaMemset(C, 0, mem_size_corr));
+        matmul_test::MatDim dim = mt_32.GetMatDim();
+        matmul_shmem_3<32, BLOCK_ROWS, float, float>(A, B, C, dim.m, dim.n, dim.k);
+        checkCuda(cudaMemcpy(mt_32.GetC(), C, mem_size_corr, cudaMemcpyDeviceToHost));
+        res = res && mt_32.IsCorrect(mt_32.GetC(), dim, 0.001f);
+    }
+    checkCuda(cudaMemcpy(A, mt_64.GetA(), mem_size_corr, cudaMemcpyHostToDevice));
+    checkCuda(cudaMemcpy(B, mt_64.GetB(), mem_size_corr, cudaMemcpyHostToDevice));
+    for (int i = 0; i < num_reps_corr; ++i) {
+        checkCuda(cudaMemset(C, 0, mem_size_corr));
+        matmul_test::MatDim dim = mt_64.GetMatDim();
+        matmul_shmem_3<64, BLOCK_ROWS, float, float>(A, B, C, dim.m, dim.n, dim.k);
+        checkCuda(cudaMemcpy(mt_64.GetC(), C, mem_size_corr, cudaMemcpyDeviceToHost));
+        res = res && mt_64.IsCorrect(mt_64.GetC(), dim, 0.001f);
+    }
+    if (res) {
+        printf("\npassed\n");
+    } else {
+        printf("\nfailed\n");
+    }
+
+    printf("\n\n%-30s", "matmul_shmem_3_kernel, [TFLOPS]");
+    dim = mt.GetMatDimMax();
+    matmul_shmem_3<TILE_DIM, BLOCK_ROWS, float, float>(A, B, C, dim.m, dim.n, dim.k);
     checkCuda(cudaEventRecord(start, 0));
-    for (int i = 0; i < num_reps; ++i) {
-        matmul_shmem_3<TILE_DIM, BLOCK_ROWS, float, float>(A, B, C, M, N, K);
+    for (int i = 0; i < num_reps_perf; ++i) {
+        matmul_shmem_3<TILE_DIM, BLOCK_ROWS, float, float>(A, B, C, dim.m, dim.n, dim.k);
     }
     checkCuda(cudaEventRecord(stop, 0));
     checkCuda(cudaEventSynchronize(stop));
     checkCuda(cudaEventElapsedTime(&ms, start, stop));
-    printf("\n%.2f\n", 2 * M * N * 1e-9 * K * num_reps / ms);
-    checkCuda(cudaMemcpy(C_h, C, mem_size, cudaMemcpyDeviceToHost));
-//    printMatrix(C_h, M, N);
-//    printf("\n");
+    printf("\n%.2f\n", 2 * dim.m * dim.n * 1e-9 * dim.k * num_reps_perf / ms);
 
-    free(A_h);
-    free(B_h);
-    free(C_h);
     checkCuda(cudaFree(A));
     checkCuda(cudaFree(B));
     checkCuda(cudaFree(C));
