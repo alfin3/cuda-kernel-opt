@@ -1,10 +1,10 @@
-// Template classes for testing the correctness of matmul kernels.
+// Template classes for testing matmul kernels.
 //
 // The allocated source vectors with the maximal dimensions are reused to create
 // sub-matrices for test purposes. A derived class may set the values of
 // matrices to pseudorandom or constant values, apply a different scheme
 // for reusing the source vectors, and/or a different method for efficiently
-// testing the correctness of matrix multiplication.
+// testing matrix multiplication.
 
 #ifndef MATMUL_TEST_H
 #define MATMUL_TEST_H
@@ -19,113 +19,113 @@ namespace matmul_test {
 
 struct MatDim {int m, n, k;};
 
-// Abstract class with an interface prototype that cannot be instantiated.
-template <typename T>
-class MatmulTest {
- public:
-    virtual ~MatmulTest() {};
+// Helper functions.
 
-    virtual const T *GetA() const = 0;
-    virtual const T *GetB() const = 0;
-    virtual T *GetC() = 0;
-    virtual const MatDim GetMatDim() const = 0;
-    virtual const MatDim GetMatDimMax() const = 0;
-    virtual bool IsCorrect(const T *C, const MatDim& dim, const T& atol) const = 0;
-    virtual void Rerand() = 0;
-};
-
-template <typename T>
-class MatmulTestSquare : public MatmulTest<T> {
- public:
-    MatmulTestSquare(const int& dim_max, const int& tile_dim, const T& val_min, const T& val_max);
-
-    virtual const T *GetA() const;
-    virtual const T *GetB() const;
-    virtual T *GetC();
-    virtual const MatDim GetMatDim() const;
-    virtual const MatDim GetMatDimMax() const;
-    virtual bool IsCorrect(const T *C, const MatDim& dim, const T& atol) const;
-    virtual void Rerand();
-
-    void PrintA() const;
-    void PrintB() const;
-    void PrintC() const;
-
- private:
-    // Constants for allocation, initialization, and comparison.
-    const int dim_max_;
-    const int tile_dim_;
-    const T zero_;
-    const T val_min_;
-    const T val_max_;
-
-    // Source vectors of contiguous random values, allocated once.
-    std::vector<T> vec_a_;
-    std::vector<T> vec_b_;
-    std::vector<T> vec_c_;
-    void PrintHelper(const std::vector<T>& vec, const int& dim_max) const;
-};
-
-template <typename T>
-void MatmulTestSquare<T>::PrintHelper(const std::vector<T>& vec, const int& dim_max) const {
-    const typename std::vector<T>::const_iterator itr_end = vec.end();
-    for (typename std::vector<T>::const_iterator itr = vec.begin(); itr != itr_end;
-         itr += dim_max_) {
-        std::for_each(itr, itr + dim_max_, [](const T& val) {std::cout << " " << val;});
+template <typename DT>
+static void PrintHelper(const std::vector<DT>& vec, const int& dim, const int& dim_max) {
+    const typename std::vector<DT>::const_iterator itr_end = vec.end();
+    for (typename std::vector<DT>::const_iterator itr = vec.begin(); itr != itr_end; itr += dim_max) {
+        std::for_each(itr, itr + dim, [](const DT& val) {std::cout << " " << val;});
         std::cout << std::endl;
     }
     std::cout << std::endl;
 }
 
-template <typename T>
-MatmulTestSquare<T>::MatmulTestSquare(const int& dim_max, const int& tile_dim, const T& val_min,
-                                      const T& val_max) :
-    dim_max_(dim_max), tile_dim_(tile_dim), zero_(static_cast<T>(0)), val_min_(val_min),
-    val_max_(val_max), vec_a_(dim_max * dim_max), vec_b_(dim_max * dim_max),
-    vec_c_(dim_max * dim_max) {
+// Abstract class with an interface prototype that cannot be instantiated.
+template <typename DT, typename DT_ACC>
+class MatmulTest {
+ public:
+    virtual ~MatmulTest() {};
+
+    virtual const DT *GetA() const = 0;
+    virtual const DT *GetB() const = 0;
+    virtual DT_ACC *GetRes() = 0;
+    virtual const MatDim GetMatDim() const = 0;
+    virtual const MatDim GetMatDimMax() const = 0;
+    virtual void Rerand() = 0;
+};
+
+// MatmulTestSquare.
+
+template <typename DT, typename DT_ACC>
+class MatmulTestSquare : public MatmulTest<DT, DT_ACC> {
+ public:
+    MatmulTestSquare(const int& dim_max, const int& tile_dim, const float& val_min, const float& val_max);
+
+    virtual const DT *GetA() const;
+    virtual const DT *GetB() const;
+    virtual DT_ACC *GetRes();
+    virtual const MatDim GetMatDim() const;
+    virtual const MatDim GetMatDimMax() const;
+    virtual void Rerand();
+
+    bool IsCorrect(const DT_ACC *res, const MatDim& dim, const DT_ACC& atol) const;
+
+    void PrintA(const int& dim) const;
+    void PrintB(const int& dim) const;
+    void PrintRes(const int& dim) const;
+
+ private:
+    // Constants for allocation, initialization, and comparison.
+    const int dim_max_;
+    const int tile_dim_;
+    const float val_min_;
+    const float val_max_;
+
+    // Source vectors of contiguous random values, allocated once.
+    std::vector<DT> vec_a_;
+    std::vector<DT> vec_b_;
+    std::vector<DT_ACC> vec_res_;
+};
+
+template <typename DT, typename DT_ACC>
+MatmulTestSquare<DT, DT_ACC>::MatmulTestSquare(const int& dim_max, const int& tile_dim, const float& val_min,
+    const float& val_max) :
+    dim_max_(dim_max), tile_dim_(tile_dim), val_min_(val_min), val_max_(val_max), vec_a_(dim_max * dim_max),
+    vec_b_(dim_max * dim_max), vec_res_(dim_max * dim_max) {
     std::srand(static_cast<unsigned int>(time(NULL)));
     Rerand();
 }
 
-template <typename T>
-const T *MatmulTestSquare<T>::GetA() const {
+template <typename DT, typename DT_ACC>
+const DT *MatmulTestSquare<DT, DT_ACC>::GetA() const {
     return &vec_a_[0];
 }
 
-template <typename T>
-const T *MatmulTestSquare<T>::GetB() const {
+template <typename DT, typename DT_ACC>
+const DT *MatmulTestSquare<DT, DT_ACC>::GetB() const {
     return &vec_b_[0];
 }
 
-template <typename T>
-T *MatmulTestSquare<T>::GetC() {
-    return &vec_c_[0];
+template <typename DT, typename DT_ACC>
+DT_ACC *MatmulTestSquare<DT, DT_ACC>::GetRes() {
+    return &vec_res_[0];
 }
 
-template <typename T>
-const MatDim MatmulTestSquare<T>::GetMatDim() const {
+template <typename DT, typename DT_ACC>
+const MatDim MatmulTestSquare<DT, DT_ACC>::GetMatDim() const {
     int dim = rand() % (dim_max_ + 1);
     dim = (dim <= tile_dim_) ? tile_dim_ : dim - (dim % tile_dim_);
     return {dim, dim, dim};
 }
 
-template <typename T>
-const MatDim MatmulTestSquare<T>::GetMatDimMax() const {
+template <typename DT, typename DT_ACC>
+const MatDim MatmulTestSquare<DT, DT_ACC>::GetMatDimMax() const {
     return {dim_max_, dim_max_, dim_max_};
 }
 
-template <typename T>
-bool MatmulTestSquare<T>::IsCorrect(const T *C, const MatDim& dim, const T& atol) const {
-    assert(C == &vec_c_[0]);
+template <typename DT, typename DT_ACC>
+bool MatmulTestSquare<DT, DT_ACC>::IsCorrect(const DT_ACC *res, const MatDim& dim, const DT_ACC& atol) const {
+    assert(res == &vec_res_[0]);
     for (int i = 0; i < dim.m; ++i) {
         for (int j = 0; j < dim.n; ++j) {
 
             // Compute matmul value and compare.
-            T val_c = zero_;
+            DT_ACC temp = static_cast<DT_ACC>(0);
             for (int k = 0; k < dim.k; ++k) {
-                val_c += vec_a_[i * dim.k + k] * vec_b_[k * dim.n + j];
+                temp += static_cast<DT_ACC>(vec_a_[i * dim.k + k]) * static_cast<DT_ACC>(vec_b_[k * dim.n + j]);
             }
-            if (std::abs(val_c - C[i * dim.n + j]) > atol) {
+            if (std::abs(temp - res[i * dim.n + j]) > atol) {
                 return false;
             }
         }
@@ -133,31 +133,158 @@ bool MatmulTestSquare<T>::IsCorrect(const T *C, const MatDim& dim, const T& atol
     return true;
 }
 
-template <typename T>
-void MatmulTestSquare<T>::Rerand() {
-    const typename std::vector<T>::iterator itr_a_end = vec_a_.end();
-    typename std::vector<T>::iterator itr_b = vec_b_.begin();
-    for (typename std::vector<T>::iterator itr_a = vec_a_.begin(); itr_a != itr_a_end; ++itr_a,
-         ++itr_b) {
-        *itr_a = std::rand() / (RAND_MAX + 1.0) * (val_max_ - val_min_) + val_min_;
-        *itr_b = std::rand() / (RAND_MAX + 1.0) * (val_max_ - val_min_) + val_min_;
+template <typename DT, typename DT_ACC>
+void MatmulTestSquare<DT, DT_ACC>::Rerand() {
+    const typename std::vector<DT>::iterator itr_a_end = vec_a_.end();
+    typename std::vector<DT>::iterator itr_b = vec_b_.begin();
+    for (typename std::vector<DT>::iterator itr_a = vec_a_.begin(); itr_a != itr_a_end; ++itr_a, ++itr_b) {
+        *itr_a = static_cast<DT>(std::rand() / (RAND_MAX + 1.0f) * (val_max_ - val_min_) + val_min_);
+        *itr_b = static_cast<DT>(std::rand() / (RAND_MAX + 1.0f) * (val_max_ - val_min_) + val_min_);
     }
-    // TODO: transpose of B.
 }
 
-template <typename T>
-void MatmulTestSquare<T>::PrintA() const {
-    PrintHelper(vec_a_, dim_max_);
+template <typename DT, typename DT_ACC>
+void MatmulTestSquare<DT, DT_ACC>::PrintA(const int& dim) const {
+    PrintHelper<DT>(vec_a_, dim, dim_max_);
 };
 
-template <typename T>
-void MatmulTestSquare<T>::PrintB() const {
-    PrintHelper(vec_b_, dim_max_);
+template <typename DT, typename DT_ACC>
+void MatmulTestSquare<DT, DT_ACC>::PrintB(const int& dim) const {
+    PrintHelper<DT>(vec_b_, dim, dim_max_);
 }
 
-template <typename T>
-void MatmulTestSquare<T>::PrintC() const {
-    PrintHelper(vec_c_, dim_max_);
+template <typename DT, typename DT_ACC>
+void MatmulTestSquare<DT, DT_ACC>::PrintRes(const int& dim) const {
+    PrintHelper<DT_ACC>(vec_res_, dim, dim_max_);
+}
+
+// MatmulTestGemmSquare.
+
+template <typename DT, typename DT_ACC>
+class MatmulTestGemmSquare : public MatmulTest<DT, DT_ACC> {
+ public:
+    MatmulTestGemmSquare(const int& dim_max, const int& tile_dim, const float& val_min, const float& val_max);
+
+    virtual const DT *GetA() const;
+    virtual const DT *GetB() const;
+    const DT_ACC *GetC() const;
+    virtual DT_ACC *GetRes();
+    virtual const MatDim GetMatDim() const;
+    virtual const MatDim GetMatDimMax() const;
+    virtual void Rerand();
+
+    bool IsCorrect(const DT_ACC *res, const MatDim& dim, const DT_ACC& alpha, const DT_ACC& beta, const DT_ACC& atol) const;
+
+    void PrintA(const int& dim) const;
+    void PrintB(const int& dim) const;
+    void PrintC(const int& dim) const;
+    void PrintRes(const int& dim) const;
+
+ private:
+    // Constants for allocation, initialization, and comparison.
+    const int dim_max_;
+    const int tile_dim_;
+    const float val_min_;
+    const float val_max_;
+
+    // Source vectors of contiguous random values, allocated once.
+    std::vector<DT> vec_a_;
+    std::vector<DT> vec_b_;
+    std::vector<DT_ACC> vec_c_;
+    std::vector<DT_ACC> vec_res_;
+};
+
+template <typename DT, typename DT_ACC>
+MatmulTestGemmSquare<DT, DT_ACC>::MatmulTestGemmSquare(const int& dim_max, const int& tile_dim, const float& val_min,
+    const float& val_max) :
+    dim_max_(dim_max), tile_dim_(tile_dim), val_min_(val_min), val_max_(val_max), vec_a_(dim_max * dim_max), vec_b_(dim_max * dim_max), vec_c_(dim_max * dim_max),
+    vec_res_(dim_max * dim_max) {
+    std::srand(static_cast<unsigned int>(time(NULL)));
+    Rerand();
+}
+
+template <typename DT, typename DT_ACC>
+const DT *MatmulTestGemmSquare<DT, DT_ACC>::GetA() const {
+    return &vec_a_[0];
+}
+
+template <typename DT, typename DT_ACC>
+const DT *MatmulTestGemmSquare<DT, DT_ACC>::GetB() const {
+    return &vec_b_[0];
+}
+
+template <typename DT, typename DT_ACC>
+const DT_ACC *MatmulTestGemmSquare<DT, DT_ACC>::GetC() const {
+    return &vec_c_[0];
+}
+
+template <typename DT, typename DT_ACC>
+DT_ACC *MatmulTestGemmSquare<DT, DT_ACC>::GetRes() {
+    return &vec_res_[0];
+}
+
+template <typename DT, typename DT_ACC>
+const MatDim MatmulTestGemmSquare<DT, DT_ACC>::GetMatDim() const {
+    int dim = rand() % (dim_max_ + 1);
+    dim = (dim <= tile_dim_) ? tile_dim_ : dim - (dim % tile_dim_);
+    return {dim, dim, dim};
+}
+
+template <typename DT, typename DT_ACC>
+const MatDim MatmulTestGemmSquare<DT, DT_ACC>::GetMatDimMax() const {
+    return {dim_max_, dim_max_, dim_max_};
+}
+
+template <typename DT, typename DT_ACC>
+bool MatmulTestGemmSquare<DT, DT_ACC>::IsCorrect(const DT_ACC *res, const MatDim& dim, const DT_ACC& alpha, const DT_ACC& beta,
+    const DT_ACC& atol) const {
+    assert(res == &vec_res_[0]);
+    for (int i = 0; i < dim.m; ++i) {
+        for (int j = 0; j < dim.n; ++j) {
+
+            // Compute matmul value and compare.
+            DT_ACC temp = static_cast<DT_ACC>(0);
+            for (int k = 0; k < dim.k; ++k) {
+                temp += static_cast<DT_ACC>(vec_a_[i * dim.k + k]) * static_cast<DT_ACC>(vec_b_[k * dim.n + j]);
+            }
+            if (std::abs(alpha * temp + beta * vec_c_[i * dim.n + j] - res[i * dim.n + j]) > atol) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+template <typename DT, typename DT_ACC>
+void MatmulTestGemmSquare<DT, DT_ACC>::Rerand() {
+    const typename std::vector<DT>::iterator itr_a_end = vec_a_.end();
+    typename std::vector<DT>::iterator itr_b = vec_b_.begin();
+    typename std::vector<DT_ACC>::iterator itr_c = vec_c_.begin();
+    for (typename std::vector<DT>::iterator itr_a = vec_a_.begin(); itr_a != itr_a_end; ++itr_a, ++itr_b, ++itr_c) {
+        *itr_a = static_cast<DT>(std::rand() / (RAND_MAX + 1.0f) * (val_max_ - val_min_) + val_min_);
+        *itr_b = static_cast<DT>(std::rand() / (RAND_MAX + 1.0f) * (val_max_ - val_min_) + val_min_);
+        *itr_c = static_cast<DT_ACC>(std::rand() / (RAND_MAX + 1.0f) * (val_max_ - val_min_) + val_min_);
+    }
+}
+
+template <typename DT, typename DT_ACC>
+void MatmulTestGemmSquare<DT, DT_ACC>::PrintA(const int& dim) const {
+    PrintHelper<DT>(vec_a_, dim, dim_max_);
+};
+
+template <typename DT, typename DT_ACC>
+void MatmulTestGemmSquare<DT, DT_ACC>::PrintB(const int& dim) const {
+    PrintHelper<DT>(vec_b_, dim, dim_max_);
+}
+
+template <typename DT, typename DT_ACC>
+void MatmulTestGemmSquare<DT, DT_ACC>::PrintC(const int& dim) const {
+    PrintHelper<DT_ACC>(vec_c_, dim, dim_max_);
+}
+
+template <typename DT, typename DT_ACC>
+void MatmulTestGemmSquare<DT, DT_ACC>::PrintRes(const int& dim) const {
+    PrintHelper<DT_ACC>(vec_res_, dim, dim_max_);
 }
 
 } // Namespace matmul_test.
