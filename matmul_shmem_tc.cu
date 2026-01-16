@@ -30,6 +30,7 @@ const int WMMA_M = 16;
 const int WMMA_N = 16;
 const int WMMA_K = 16;
 
+const int WARP_SIZE = 32;
 const int WARP_TILE_ROWS_MAX = 4;
 const int WARP_TILE_COLS_MAX = 4;
 
@@ -61,8 +62,8 @@ void load_tile(
     int lane_id) {
     const int len_vec = sizeof(int4) / sizeof(DT);
 #pragma unroll
-    for (int shmem_offset = 0; shmem_offset < rows * cols; shmem_offset += num_warps * warpSize * len_vec) {
-        const int temp = shmem_offset + (warp_id * warpSize + lane_id) * len_vec;
+    for (int shmem_offset = 0; shmem_offset < rows * cols; shmem_offset += num_warps * WARP_SIZE * len_vec) {
+        const int temp = shmem_offset + (warp_id * WARP_SIZE + lane_id) * len_vec;
         const int shmem_idx = temp + (temp / cols) * shmem_skew;
         const int idx = offset_a + (temp / cols) * stride_am + temp % cols;
         *reinterpret_cast<int4 *>(shmem_ptr + shmem_idx) = *reinterpret_cast<const int4 *>(a_ptr + idx);
@@ -84,8 +85,8 @@ void store_tile(
     int lane_id) {
     const int len_vec = sizeof(int4) / sizeof(DT);
 #pragma unroll
-    for (int shmem_offset = 0; shmem_offset < rows * cols; shmem_offset += num_warps * warpSize * len_vec) {
-        const int temp = shmem_offset + (warp_id * warpSize + lane_id) * len_vec;
+    for (int shmem_offset = 0; shmem_offset < rows * cols; shmem_offset += num_warps * WARP_SIZE * len_vec) {
+        const int temp = shmem_offset + (warp_id * WARP_SIZE + lane_id) * len_vec;
         const int shmem_idx = temp + (temp / cols) * shmem_skew;
         const int idx = offset_a + (temp / cols) * stride_am + temp % cols;
         *reinterpret_cast<int4 *>(a_ptr + idx) = *reinterpret_cast<const int4 *>(shmem_ptr + shmem_idx);
@@ -114,8 +115,8 @@ void gemm_tensor_core_0_kernel(
     int N,
     int K,
     int num_warps) {
-    const int warp_id = threadIdx.x / warpSize;
-    const int lane_id = threadIdx.x % warpSize;
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane_id = threadIdx.x % WARP_SIZE;
 
     // The dimensions of a warp tile computed by a warp are as follows:
     // 4 warps, TILE_DIM 64 -> 2x2 in terms of fragment tiles,
@@ -125,7 +126,7 @@ void gemm_tensor_core_0_kernel(
     const int warp_tile_cols = 4 >> (TILE_DIM == 64);
     const int warp_tile_rows = warp_tile_cols >> (num_warps == 8);
 
-    extern __shared__ DT shmem[][SEGMENT_K_DIM + SKEW_HALF];
+    extern __shared__ DT shmem[];
 
     // Assign the computation of C tiles to SMs.
     for (int num_tiles_prev = 0;; num_tiles_prev += gridDim.x) {
@@ -133,7 +134,7 @@ void gemm_tensor_core_0_kernel(
 
         const int tile_offset_cd =
             ((num_tiles_prev + blockIdx.x) * TILE_DIM) / N * TILE_DIM  + ((num_tiles_prev + blockIdx.x) * TILE_DIM) % N;
-        load_tile<DT_ACC>(reinterpret_cast<DT_ACC *>(&shmem[0][0]), C,
+        load_tile<DT_ACC>(reinterpret_cast<DT_ACC *>(&shmem[0]), C,
             TILE_DIM, TILE_DIM, tile_offset_cd, N, 0, num_warps, warp_id, lane_id);
 
         __syncthreads();
@@ -148,7 +149,7 @@ void gemm_tensor_core_0_kernel(
 #pragma unroll
             for (int j = 0; j < warp_tile_cols; ++j) {
                 const int shmem_idx = shmem_offset_warp + i * WMMA_M * TILE_DIM + j * WMMA_N;
-                wmma::load_matrix_sync(warp_tile_c[i][j], reinterpret_cast<const DT_ACC *>(&shmem[0][0]) + shmem_idx,
+                wmma::load_matrix_sync(warp_tile_c[i][j], reinterpret_cast<const DT_ACC *>(&shmem[0]) + shmem_idx,
                     TILE_DIM, wmma::mem_row_major);
             }
         }
@@ -172,9 +173,9 @@ void gemm_tensor_core_0_kernel(
         for (int segment_offset = 0; segment_offset < K; segment_offset += SEGMENT_K_DIM) {
             const int segment_offset_a = (tile_offset_cd / N) * K + segment_offset;
             const int segment_offset_b = (tile_offset_cd % N) * K + segment_offset;
-            load_tile<DT>(&shmem[0][0], A,
+            load_tile<DT>(&shmem[0], A,
                 TILE_DIM, SEGMENT_K_DIM, segment_offset_a, K, SKEW_HALF, num_warps, warp_id, lane_id);
-            load_tile<DT>(&shmem[0][0] + TILE_DIM * shmem_stride, B,
+            load_tile<DT>(&shmem[TILE_DIM * shmem_stride], B,
                 TILE_DIM, SEGMENT_K_DIM, segment_offset_b, K, SKEW_HALF, num_warps, warp_id, lane_id);
 
             __syncthreads();
@@ -186,13 +187,13 @@ void gemm_tensor_core_0_kernel(
                 wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, DT, wmma::col_major> warp_tile_b[WARP_TILE_COLS_MAX];
 #pragma unroll
                 for (int i = 0; i < warp_tile_rows; ++i) {
-                    const int shmem_idx_a = (warp_id / 2) * warp_tile_rows * WMMA_M + i * WMMA_M;
-                    wmma::load_matrix_sync(warp_tile_a[i], &shmem[shmem_idx_a][frag_tile_offset], shmem_stride);
+                    const int shmem_row_a = (warp_id / 2) * warp_tile_rows * WMMA_M + i * WMMA_M;
+                    wmma::load_matrix_sync(warp_tile_a[i], &shmem[shmem_row_a * shmem_stride + frag_tile_offset], shmem_stride);
 #pragma unroll
                     for (int j = 0; j < warp_tile_cols; ++j) {
                         if (i == 0) {
-                            const int shmem_idx_b = (warp_id % 2) * warp_tile_cols * WMMA_N + j * WMMA_N + TILE_DIM;
-                            wmma::load_matrix_sync(warp_tile_b[j], &shmem[shmem_idx_b][frag_tile_offset], shmem_stride);
+                            const int shmem_row_b = (warp_id % 2) * warp_tile_cols * WMMA_N + j * WMMA_N + TILE_DIM;
+                            wmma::load_matrix_sync(warp_tile_b[j], &shmem[shmem_row_b * shmem_stride + frag_tile_offset], shmem_stride);
                         }
                         wmma::mma_sync(warp_tile_c[i][j], warp_tile_a[i], warp_tile_b[j], warp_tile_c[i][j]);
                     }
@@ -211,7 +212,7 @@ void gemm_tensor_core_0_kernel(
                     warp_tile_c[i][j].x[k] *= alpha;
                 }
                 const int shmem_idx = shmem_offset_warp + i * WMMA_M * TILE_DIM + j * WMMA_N;
-                wmma::store_matrix_sync(reinterpret_cast<DT_ACC *>(shmem) + shmem_idx, warp_tile_c[i][j],
+                wmma::store_matrix_sync(reinterpret_cast<DT_ACC *>(&shmem[0]) + shmem_idx, warp_tile_c[i][j],
                     TILE_DIM, wmma::mem_row_major);
             }
         }
@@ -219,7 +220,7 @@ void gemm_tensor_core_0_kernel(
         __syncthreads();
 
         // Store the tile, consisting of warp tiles, from shared memory to D.
-        store_tile<DT_ACC>(D, reinterpret_cast<const DT_ACC *>(shmem),
+        store_tile<DT_ACC>(D, reinterpret_cast<const DT_ACC *>(&shmem[0]),
             TILE_DIM, TILE_DIM, tile_offset_cd, N, 0, num_warps, warp_id, lane_id);
 
         __syncthreads();
@@ -250,7 +251,7 @@ void gemm_tensor_core_0(
         (TILE_DIM * TILE_DIM * sizeof(DT_ACC)) > (2 * TILE_DIM * (SEGMENT_K_DIM + SKEW_HALF) * sizeof(DT)) ?
         (TILE_DIM * TILE_DIM * sizeof(DT_ACC)) : (2 * TILE_DIM * (SEGMENT_K_DIM + SKEW_HALF) * sizeof(DT));
     dim3 gridDim(num_sms, 1, 1);
-    dim3 blockDim(num_warps * warpSize, 1, 1);
+    dim3 blockDim(num_warps * WARP_SIZE, 1, 1);
     gemm_tensor_core_0_kernel<TILE_DIM, SEGMENT_K_DIM, DT, DT_ACC><<<gridDim, blockDim, SHMEM_REQ>>>(
         A,
         B,
