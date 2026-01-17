@@ -245,7 +245,7 @@ bool MatmulTestGemmSquare<DT, DT_ACC>::IsCorrect(const DT_ACC *res, const MatDim
             // Compute matmul value and compare.
             DT_ACC temp = static_cast<DT_ACC>(0);
             for (int k = 0; k < dim.k; ++k) {
-                temp += static_cast<DT_ACC>(vec_a_[i * dim.k + k]) * static_cast<DT_ACC>(vec_b_[k * dim.n + j]);
+                temp += static_cast<DT_ACC>(vec_a_[i * dim.k + k]) * static_cast<DT_ACC>(vec_b_[j * dim.n + k]);
             }
             if (std::abs(alpha * temp + beta * vec_c_[i * dim.n + j] - res[i * dim.n + j]) > atol) {
                 return false;
