@@ -197,8 +197,8 @@ class MatmulTestGemmSquare : public MatmulTest<DT, DT_ACC> {
 template <typename DT, typename DT_ACC>
 MatmulTestGemmSquare<DT, DT_ACC>::MatmulTestGemmSquare(const int& dim_max, const int& tile_dim, const float& val_min,
     const float& val_max) :
-    dim_max_(dim_max), tile_dim_(tile_dim), val_min_(val_min), val_max_(val_max), vec_a_(dim_max * dim_max), vec_b_(dim_max * dim_max), vec_c_(dim_max * dim_max),
-    vec_res_(dim_max * dim_max) {
+    dim_max_(dim_max), tile_dim_(tile_dim), val_min_(val_min), val_max_(val_max), vec_a_(dim_max * dim_max),
+    vec_b_(dim_max * dim_max), vec_c_(dim_max * dim_max), vec_res_(dim_max * dim_max) {
     std::srand(static_cast<unsigned int>(time(NULL)));
     Rerand();
 }
