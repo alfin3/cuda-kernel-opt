@@ -123,6 +123,17 @@ void matmul_shmem_3_kernel<float, float>(
     int K,
     int tile_dim,
     int block_rows);
+template
+__global__
+void matmul_shmem_3_kernel<int, int>(
+    const int *A,
+    const int *B,
+    int *C,
+    int M,
+    int N,
+    int K,
+    int tile_dim,
+    int block_rows);
 
 template<typename DT>
 int get_shmem_req(int tile_dim) {
