@@ -63,6 +63,7 @@ class MatmulTestSquare : public MatmulTest<DT, DT_ACC> {
     virtual void Rerand();
 
     bool IsCorrect(const DT *res, const MatDim& dim, const DT& atol) const;
+    int GetNumIncorrect(const DT *res, const MatDim& dim, const DT& atol) const;
 
     void PrintA(const int& dim) const;
     void PrintB(const int& dim) const;
@@ -137,6 +138,26 @@ bool MatmulTestSquare<DT, DT_ACC>::IsCorrect(const DT *res, const MatDim& dim, c
 }
 
 template <typename DT, typename DT_ACC>
+int MatmulTestSquare<DT, DT_ACC>::GetNumIncorrect(const DT *res, const MatDim& dim, const DT& atol) const {
+    assert(res == &vec_res_[0]);
+    int count = 0;
+    for (int i = 0; i < dim.m; ++i) {
+        for (int j = 0; j < dim.n; ++j) {
+
+            // Compute matmul value and compare.
+            DT_ACC temp = static_cast<DT_ACC>(0);
+            for (int k = 0; k < dim.k; ++k) {
+                temp += static_cast<DT_ACC>(vec_a_[i * dim.k + k]) * static_cast<DT_ACC>(vec_b_[k * dim.n + j]);
+            }
+            if (Abs(static_cast<DT>(temp) - res[i * dim.n + j]) > atol) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
+template <typename DT, typename DT_ACC>
 void MatmulTestSquare<DT, DT_ACC>::Rerand() {
     const typename std::vector<DT>::iterator itr_a_end = vec_a_.end();
     typename std::vector<DT>::iterator itr_b = vec_b_.begin();
@@ -166,6 +187,7 @@ void MatmulTestSquare<DT, DT_ACC>::PrintRes(const int& dim) const {
 template <typename DT, typename DT_ACC>
 class MatmulTestGemmSquare : public MatmulTest<DT, DT_ACC> {
  public:
+    MatmulTestGemmSquare(const int& dim_max, const int& tile_dim);
     MatmulTestGemmSquare(const int& dim_max, const int& tile_dim, const DT& val_min, const DT& val_max);
 
     virtual const DT *GetA() const;
@@ -175,8 +197,12 @@ class MatmulTestGemmSquare : public MatmulTest<DT, DT_ACC> {
     virtual const MatDim GetMatDim() const;
     virtual const MatDim GetMatDimMax() const;
     virtual void Rerand();
+    void SetConstant();
 
-    bool IsCorrect(const DT_ACC *res, const MatDim& dim, const DT_ACC& alpha, const DT_ACC& beta, const DT_ACC& atol) const;
+    bool IsCorrect(const DT_ACC *res, const MatDim& dim, const DT_ACC& alpha, const DT_ACC& beta,
+        const DT_ACC& atol) const;
+    int GetNumIncorrect(const DT_ACC *res, const MatDim& dim, const DT_ACC& alpha, const DT_ACC& beta,
+        const DT_ACC& atol) const;
 
     void PrintA(const int& dim) const;
     void PrintB(const int& dim) const;
@@ -189,6 +215,7 @@ class MatmulTestGemmSquare : public MatmulTest<DT, DT_ACC> {
     const int tile_dim_;
     const DT val_min_;
     const DT val_max_;
+    const bool is_constant_;
 
     // Source vectors of contiguous random values, allocated once.
     std::vector<DT> vec_a_;
@@ -198,10 +225,17 @@ class MatmulTestGemmSquare : public MatmulTest<DT, DT_ACC> {
 };
 
 template <typename DT, typename DT_ACC>
+MatmulTestGemmSquare<DT, DT_ACC>::MatmulTestGemmSquare(const int& dim_max, const int& tile_dim) :
+    dim_max_(dim_max), tile_dim_(tile_dim), val_min_(static_cast<DT>(1)), val_max_(static_cast<DT>(10)), is_constant_(true),
+    vec_a_(dim_max * dim_max), vec_b_(dim_max * dim_max), vec_c_(dim_max * dim_max), vec_res_(dim_max * dim_max) {
+    SetConstant();
+}
+
+template <typename DT, typename DT_ACC>
 MatmulTestGemmSquare<DT, DT_ACC>::MatmulTestGemmSquare(const int& dim_max, const int& tile_dim, const DT& val_min,
     const DT& val_max) :
-    dim_max_(dim_max), tile_dim_(tile_dim), val_min_(val_min), val_max_(val_max), vec_a_(dim_max * dim_max),
-    vec_b_(dim_max * dim_max), vec_c_(dim_max * dim_max), vec_res_(dim_max * dim_max) {
+    dim_max_(dim_max), tile_dim_(tile_dim), val_min_(val_min), val_max_(val_max), is_constant_(false),
+    vec_a_(dim_max * dim_max), vec_b_(dim_max * dim_max), vec_c_(dim_max * dim_max), vec_res_(dim_max * dim_max) {
     std::srand(static_cast<unsigned int>(time(NULL)));
     Rerand();
 }
@@ -242,6 +276,39 @@ template <typename DT, typename DT_ACC>
 bool MatmulTestGemmSquare<DT, DT_ACC>::IsCorrect(const DT_ACC *res, const MatDim& dim, const DT_ACC& alpha, const DT_ACC& beta,
     const DT_ACC& atol) const {
     assert(res == &vec_res_[0]);
+    if (is_constant_) {
+        DT_ACC val = alpha * static_cast<DT_ACC>(val_min_ * val_max_) * static_cast<DT_ACC>(dim.k) + beta *
+            static_cast<DT_ACC>(val_min_);
+        for (int i = 0; i < dim.m; ++i) {
+            for (int j = 0; j < dim.n; ++j) {
+                if (Abs(val - res[i * dim.n + j]) > atol) {
+                    return false;
+                }
+            }
+        }
+    } else {
+        for (int i = 0; i < dim.m; ++i) {
+            for (int j = 0; j < dim.n; ++j) {
+
+                // Compute matmul value and compare.
+                DT_ACC temp = static_cast<DT_ACC>(0);
+                for (int k = 0; k < dim.k; ++k) {
+                    temp += static_cast<DT_ACC>(vec_a_[i * dim.k + k]) * static_cast<DT_ACC>(vec_b_[j * dim.n + k]);
+                }
+                if (Abs(alpha * temp + beta * vec_c_[i * dim.n + j] - res[i * dim.n + j]) > atol) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+template <typename DT, typename DT_ACC>
+int MatmulTestGemmSquare<DT, DT_ACC>::GetNumIncorrect(const DT_ACC *res, const MatDim& dim, const DT_ACC& alpha,
+    const DT_ACC& beta, const DT_ACC& atol) const {
+    int count = 0;
+    assert(res == &vec_res_[0]);
     for (int i = 0; i < dim.m; ++i) {
         for (int j = 0; j < dim.n; ++j) {
 
@@ -251,11 +318,11 @@ bool MatmulTestGemmSquare<DT, DT_ACC>::IsCorrect(const DT_ACC *res, const MatDim
                 temp += static_cast<DT_ACC>(vec_a_[i * dim.k + k]) * static_cast<DT_ACC>(vec_b_[j * dim.n + k]);
             }
             if (Abs(alpha * temp + beta * vec_c_[i * dim.n + j] - res[i * dim.n + j]) > atol) {
-                return false;
+                ++count;
             }
         }
     }
-    return true;
+    return count;
 }
 
 template <typename DT, typename DT_ACC>
@@ -268,6 +335,18 @@ void MatmulTestGemmSquare<DT, DT_ACC>::Rerand() {
         *itr_b = static_cast<DT>(std::rand() / (RAND_MAX + 1.0f) * static_cast<float>(val_max_ - val_min_)) + val_min_;
         *itr_c = static_cast<DT_ACC>(std::rand() / (RAND_MAX + 1.0f) * static_cast<float>(val_max_ - val_min_)) +
             static_cast<DT_ACC>(val_min_);
+    }
+}
+
+template <typename DT, typename DT_ACC>
+void MatmulTestGemmSquare<DT, DT_ACC>::SetConstant() {
+    const typename std::vector<DT>::iterator itr_a_end = vec_a_.end();
+    typename std::vector<DT>::iterator itr_b = vec_b_.begin();
+    typename std::vector<DT_ACC>::iterator itr_c = vec_c_.begin();
+    for (typename std::vector<DT>::iterator itr_a = vec_a_.begin(); itr_a != itr_a_end; ++itr_a, ++itr_b, ++itr_c) {
+        *itr_a = val_min_;
+        *itr_b = val_max_;
+        *itr_c = static_cast<DT_ACC>(val_min_);
     }
 }
 

@@ -326,6 +326,76 @@ void RunCorrectnessTestSquare(
     int num_warps_start, // 4 or 8.
     int num_warps_end, // 4 or 8.
     int num_reps,
+    DT_ACC atol) {
+    int mem_size_a = M * K * sizeof(DT);
+    int mem_size_b = K * N * sizeof(DT);
+    int mem_size_c = M * N * sizeof(DT_ACC);
+    int mem_size_d = M * N * sizeof(DT_ACC);
+
+    DT *A, *B;
+    DT_ACC *C, *D;
+
+    checkCuda(cudaMalloc(&A, mem_size_a));
+    checkCuda(cudaMalloc(&B, mem_size_b));
+    checkCuda(cudaMalloc(&C, mem_size_c));
+    checkCuda(cudaMalloc(&D, mem_size_d));
+
+    for (int tile_dim = tile_dim_start; tile_dim <= tile_dim_end; tile_dim *= 2) {
+        matmul_test::MatmulTestGemmSquare<DT, DT_ACC> mt(M, tile_dim);
+        checkCuda(cudaMemcpy(A, mt.GetA(), mem_size_a, cudaMemcpyHostToDevice));
+        checkCuda(cudaMemcpy(B, mt.GetB(), mem_size_b, cudaMemcpyHostToDevice));
+        checkCuda(cudaMemcpy(C, mt.GetC(), mem_size_c, cudaMemcpyHostToDevice));
+        for (int segment_k_dim = segment_k_dim_start; segment_k_dim <= segment_k_dim_end; segment_k_dim *= 2) {
+            if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_k_dim) <= prop->sharedMemPerMultiprocessor &&
+                !(segment_k_dim % (tile_dim / 2)) &&
+                !(K % segment_k_dim)) {
+                for (int num_warps = num_warps_start; num_warps <= num_warps_end; num_warps *= 2) {
+                    bool res = true;
+                    if (segment_k_dim <= tile_dim) {
+                        for (int i = 0; i < num_reps; ++i) {
+                            checkCuda(cudaMemset(D, 0, mem_size_d));
+                            matmul_test::MatDim dim = mt.GetMatDim();
+                            gemm_tensor_core_0<DT, DT_ACC>(A, B, C, D, alpha, beta,
+                                dim.m, dim.n, dim.k, tile_dim, segment_k_dim, num_warps, prop->multiProcessorCount);
+                            checkCuda(cudaMemcpy(mt.GetRes(), D, mem_size_d, cudaMemcpyDeviceToHost));
+                            res = res && mt.IsCorrect(mt.GetRes(), dim, alpha, beta, atol);
+                        }
+                        printf("(%d, %d, %d): %s\n", tile_dim, segment_k_dim, num_warps, res ? "passed" : "failed");
+                    } else {
+                        checkCuda(cudaMemset(D, 0, mem_size_d));
+                        matmul_test::MatDim dim = mt.GetMatDimMax();
+                        gemm_tensor_core_0<DT, DT_ACC>(A, B, C, D, alpha, beta,
+                            dim.m, dim.n, dim.k, tile_dim, segment_k_dim, num_warps, prop->multiProcessorCount);
+                        checkCuda(cudaMemcpy(mt.GetRes(), D, mem_size_d, cudaMemcpyDeviceToHost));
+                        res = res && mt.IsCorrect(mt.GetRes(), dim, alpha, beta, atol);
+                        printf("(%d, %d, %d): %s\n", tile_dim, segment_k_dim, num_warps, res ? "passed" : "failed");
+                    }
+                }
+            }
+        }
+    }
+
+    checkCuda(cudaFree(A));
+    checkCuda(cudaFree(B));
+    checkCuda(cudaFree(C));
+    checkCuda(cudaFree(D));
+}
+
+template<typename DT, typename DT_ACC>
+void RunAccuracyTestSquare(
+    const cudaDeviceProp *prop,
+    DT_ACC alpha,
+    DT_ACC beta,
+    int M,
+    int N,
+    int K,
+    int tile_dim_start, // 64 or 128.
+    int tile_dim_end, // 64 or 128.
+    int segment_k_dim_start, // multiple of (tile_dim / 2).
+    int segment_k_dim_end, // multiple of (tile_dim / 2).
+    int num_warps_start, // 4 or 8.
+    int num_warps_end, // 4 or 8.
+    int num_reps,
     DT val_min,
     DT val_max,
     DT_ACC atol) {
@@ -352,7 +422,7 @@ void RunCorrectnessTestSquare(
                 !(segment_k_dim % (tile_dim / 2)) &&
                 !(K % segment_k_dim)) {
                 for (int num_warps = num_warps_start; num_warps <= num_warps_end; num_warps *= 2) {
-                    bool res = true;
+                    int count = 0;
                     if (segment_k_dim <= tile_dim) {
                         for (int i = 0; i < num_reps; ++i) {
                             checkCuda(cudaMemset(D, 0, mem_size_d));
@@ -360,17 +430,20 @@ void RunCorrectnessTestSquare(
                             gemm_tensor_core_0<DT, DT_ACC>(A, B, C, D, alpha, beta,
                                 dim.m, dim.n, dim.k, tile_dim, segment_k_dim, num_warps, prop->multiProcessorCount);
                             checkCuda(cudaMemcpy(mt.GetRes(), D, mem_size_d, cudaMemcpyDeviceToHost));
-                            res = res && mt.IsCorrect(mt.GetRes(), dim, alpha, beta, atol);
+                            count += mt.GetNumIncorrect(mt.GetRes(), dim, alpha, beta, atol);
                         }
+                        printf("(%d, %d, %d): %.2f / %d\n",
+                            tile_dim, segment_k_dim, num_warps, static_cast<float>(count) / num_reps, M * N);
                     } else {
                         checkCuda(cudaMemset(D, 0, mem_size_d));
                         matmul_test::MatDim dim = mt.GetMatDimMax();
                         gemm_tensor_core_0<DT, DT_ACC>(A, B, C, D, alpha, beta,
                             dim.m, dim.n, dim.k, tile_dim, segment_k_dim, num_warps, prop->multiProcessorCount);
                         checkCuda(cudaMemcpy(mt.GetRes(), D, mem_size_d, cudaMemcpyDeviceToHost));
-                        res = mt.IsCorrect(mt.GetRes(), dim, alpha, beta, atol);
+                        count = mt.GetNumIncorrect(mt.GetRes(), dim, alpha, beta, atol);
+                        printf("(%d, %d, %d): %.2f / %d\n",
+                            tile_dim, segment_k_dim, num_warps, static_cast<float>(count), M * N) ;
                     }
-                    printf("(%d, %d, %d): %s\n", tile_dim, segment_k_dim, num_warps, res ? "passed" : "failed");
                 }
             }
         }
@@ -381,6 +454,7 @@ void RunCorrectnessTestSquare(
     checkCuda(cudaFree(C));
     checkCuda(cudaFree(D));
 }
+
 
 template<typename DT, typename DT_ACC>
 void RunPerformanceTestSquare(
@@ -466,15 +540,37 @@ int main(void) {
 
     // Correctness tests.
 
-    int M = 256; //1024;
-    int N = 256; //1024;
-    int K = 256; //1024;
+    int M = 1024;
+    int N = 1024;
+    int K = 1024;
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, correctness:\n");
-    RunCorrectnessTestSquare<half, half>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, -1.0f, 1.0f, 0.2f);
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (1024, 1024, 1024), correctness:\n");
+    RunCorrectnessTestSquare<half, half>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, 0.001f);
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, correctness:\n");
-    RunCorrectnessTestSquare<half, float>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (1024, 1024, 1024), correctness:\n");
+    RunCorrectnessTestSquare<half, float>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, 0.001f);
+
+    // Accuracy tests.
+
+    M = 256;
+    N = 256;
+    K = 256;
+
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (256, 256, 256), accuracy:\n");
+    RunAccuracyTestSquare<half, half>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (256, 256, 256), accuracy:\n");
+    RunAccuracyTestSquare<half, float>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+
+    M = 512;
+    N = 512;
+    K = 512;
+
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (512, 512, 512), accuracy:\n");
+    RunAccuracyTestSquare<half, half>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (512, 512, 512), accuracy:\n");
+    RunAccuracyTestSquare<half, float>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     // Performance tests.
 
@@ -482,10 +578,10 @@ int main(void) {
     N = 16384;
     K = 16384;
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, [TFLOPS]:\n");
-    RunPerformanceTestSquare<half, half>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, -1.0f, 1.0f, 0.2f);
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (16384, 16384, 16384), [TFLOPS]:\n");
+    RunPerformanceTestSquare<half, half>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, [TFLOPS]:\n");
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (16384, 16384, 16384), [TFLOPS]:\n");
     RunPerformanceTestSquare<half, float>(&prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 512, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     return 0;
