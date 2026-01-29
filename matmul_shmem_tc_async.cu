@@ -1,4 +1,5 @@
-// GEMM (D = alpha * A * B + beta * C) using shared memory and Tensor Cores.
+// GEMM (D = alpha * A * B + beta * C) using shared memory and Tensor Cores, as well as various methods
+// to overlap computation with data movement.
 //
 // The kernel enables changing i) the square tile dimension from 64 to 128, ii) the segment of the K
 // dimension loaded into the shared memory, and iii) the number of warps from 4 to 8, while providing
@@ -35,7 +36,6 @@ const int WARP_SIZE = 32;
 const int WARP_TILE_ROWS_MAX = 4;
 const int WARP_TILE_COLS_MAX = 4;
 
-const int NUM_STAGES_MAX = 4;
 const int SKEW_HALF = 16;
 
 inline
@@ -155,7 +155,8 @@ void consume(
     }
 }
 
-// Computes GEMM (D = alpha * A * B + beta * C) with Tensor Cores and the following arguments:
+// Computes GEMM (D = alpha * A * B + beta * C) with Tensor Cores and cuda::memcpy_async to bypass the
+// staging through registers, and accepts the following arguments:
 // DT: half,
 // DT_ACC: half or float,
 // M, N, K: multiples of tile_dim,
@@ -194,10 +195,10 @@ void gemm_tensor_core_async_0_kernel(
     DT* shmem = reinterpret_cast<DT *>(&shmem_[0]);
 
     __shared__ CudaBarrier bars[1];
-    CudaBarrier *bar_consumer = &bars[0];
+    CudaBarrier *bar = &bars[0];
 
     if (threadIdx.x == 0) {
-        init(bar_consumer, num_warps * WARP_SIZE);
+        init(bar, num_warps * WARP_SIZE);
     }
 
     __syncthreads();
@@ -209,10 +210,10 @@ void gemm_tensor_core_async_0_kernel(
         const int tile_offset_cd =
             ((num_tiles_prev + blockIdx.x) * tile_dim) / N * tile_dim * N  + ((num_tiles_prev + blockIdx.x) * tile_dim) % N;
 
-        load_tile_async<DT_ACC>(*bar_consumer, reinterpret_cast<DT_ACC *>(&shmem[0]), C,
+        load_tile_async<DT_ACC>(*bar, reinterpret_cast<DT_ACC *>(&shmem[0]), C,
             tile_dim, tile_dim, tile_offset_cd, N, 0, num_warps, warp_id, lane_id);
 
-        bar_consumer->arrive_and_wait();
+        bar->arrive_and_wait();
 
         wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, DT_ACC> warp_tile_c[WARP_TILE_ROWS_MAX][WARP_TILE_COLS_MAX];
 
@@ -229,7 +230,7 @@ void gemm_tensor_core_async_0_kernel(
             }
         }
 
-        bar_consumer->arrive_and_wait();
+        bar->arrive_and_wait();
 
 #pragma unroll
         for (int i = 0; i < warp_tile_rows; ++i) {
@@ -242,22 +243,22 @@ void gemm_tensor_core_async_0_kernel(
             }
         }
 
-        bar_consumer->arrive_and_wait();
+        bar->arrive_and_wait();
 
         // Copy the tiles of A and B into the shared memory, iterating in the K dimension.
         const int shmem_stride = segment_k_dim + SKEW_HALF;
 #pragma unroll
         for (int segment_offset = 0; segment_offset < K; segment_offset += segment_k_dim) {
 
-            produce<DT>(bar_consumer, shmem, A, B, K, tile_dim, segment_k_dim, (tile_offset_cd / N) * K,
+            produce<DT>(bar, shmem, A, B, K, tile_dim, segment_k_dim, (tile_offset_cd / N) * K,
                 (tile_offset_cd % N) * K, segment_offset, shmem_stride, SKEW_HALF, num_warps, warp_id, lane_id);
 
-            bar_consumer->arrive_and_wait();
+            bar->arrive_and_wait();
 
             consume<DT, DT_ACC>(warp_tile_c, shmem, K, tile_dim, segment_k_dim, shmem_stride, warp_tile_rows,
                 warp_tile_cols, warp_id);
 
-            bar_consumer->arrive_and_wait();
+            bar->arrive_and_wait();
         }
 
 #pragma unroll
@@ -274,13 +275,13 @@ void gemm_tensor_core_async_0_kernel(
             }
         }
 
-        bar_consumer->arrive_and_wait();
+        bar->arrive_and_wait();
 
         // Store the tile, consisting of warp tiles, from shared memory to D.
         store_tile<DT_ACC>(D, reinterpret_cast<const DT_ACC *>(&shmem[0]),
             tile_dim, tile_dim, tile_offset_cd, N, 0, num_warps, warp_id, lane_id);
 
-        bar_consumer->arrive_and_wait();
+        bar->arrive_and_wait();
     }
 }
 
