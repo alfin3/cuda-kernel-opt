@@ -147,7 +147,8 @@ void produce(
         const int segment_offset_a = offset_a + segment_count * cols;
         const int segment_offset_b = offset_b + segment_count * cols;
         const int shmem_stage_offset_a = (segment_count % num_stages) * rows * shmem_stride;
-        const int shmem_stage_offset_b = (segment_count % num_stages) * rows * shmem_stride + num_stages * rows * shmem_stride;
+        const int shmem_stage_offset_b =
+            (segment_count % num_stages) * rows * shmem_stride + num_stages * rows * shmem_stride;
         load_tile_async<DT>(full[segment_count % num_stages], shmem_ptr + shmem_stage_offset_a, a_ptr,
             rows, cols, segment_offset_a, K, shmem_skew, num_warps, warp_id, lane_id);
         load_tile_async<DT>(full[segment_count % num_stages], shmem_ptr + shmem_stage_offset_b, b_ptr,
@@ -180,7 +181,7 @@ void consume(
         full[segment_count % num_stages].arrive_and_wait();
 
         const int shmem_stage_offset_a = (segment_count % num_stages) * rows * shmem_stride;
-        const int shmem_stage_offset_b = (segment_count % num_stages) * rows * shmem_stride + num_stages * rows * shmem_stride;
+        const int shmem_stage_offset_b = shmem_stage_offset_a + num_stages * rows * shmem_stride;
 #pragma unroll
         for (int frag_tile_offset = 0; frag_tile_offset < cols; frag_tile_offset += WMMA_K) {
             wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, DT, wmma::row_major> warp_tile_a[WARP_TILE_ROWS_MAX];
@@ -188,12 +189,14 @@ void consume(
 #pragma unroll
             for (int i = 0; i < warp_tile_rows; ++i) {
                 const int shmem_row_a = (warp_id / 2) * warp_tile_rows * WMMA_M + i * WMMA_M;
-                wmma::load_matrix_sync(warp_tile_a[i], shmem_ptr + shmem_stage_offset_a + (shmem_row_a * shmem_stride + frag_tile_offset), shmem_stride);
+                wmma::load_matrix_sync(warp_tile_a[i],
+                    shmem_ptr + shmem_stage_offset_a + (shmem_row_a * shmem_stride + frag_tile_offset), shmem_stride);
 #pragma unroll
                 for (int j = 0; j < warp_tile_cols; ++j) {
                     if (i == 0) {
                         const int shmem_row_b = (warp_id % 2) * warp_tile_cols * WMMA_N + j * WMMA_N;
-                        wmma::load_matrix_sync(warp_tile_b[j], shmem_ptr + shmem_stage_offset_b + (shmem_row_b * shmem_stride + frag_tile_offset), shmem_stride);
+                        wmma::load_matrix_sync(warp_tile_b[j],
+                            shmem_ptr + shmem_stage_offset_b + (shmem_row_b * shmem_stride + frag_tile_offset), shmem_stride);
                     }
                     wmma::mma_sync(warp_tile_c[i][j], warp_tile_a[i], warp_tile_b[j], warp_tile_c[i][j]);
                 }
@@ -315,10 +318,18 @@ void gemm_tensor_core_async_0_kernel(
                 (tile_offset_cd % N) * K, shmem_stride, SKEW_HALF, num_stages, num_producer_warps, warp_id, lane_id);
         } else {
             const int warp_id = (threadIdx.x - num_producer_warps * WARP_SIZE) / WARP_SIZE;
-            consume<DT, DT_ACC>(empty, full, warp_tile_c, shmem, K, tile_dim, segment_k_dim, shmem_stride, num_stages, warp_tile_rows, warp_tile_cols, warp_id);
+            consume<DT, DT_ACC>(empty, full, warp_tile_c, shmem, K, tile_dim, segment_k_dim, shmem_stride, num_stages,
+                warp_tile_rows, warp_tile_cols, warp_id);
         }
 
-        __syncthreads(); // All threads of consumer warps must complete matrix multiply and accumulate.
+        __syncthreads();
+        if (threadIdx.x < num_producer_warps * WARP_SIZE) {
+            for (int i = 0; i < num_stages; ++i) {
+                auto token = empty[i].arrive();
+            }
+        }
+        // All threads of the consumer warps completed matrix multiply and accumulate, and
+        // the empty barriers were reset for the next tile to be computed on the current SM.
 
         if (threadIdx.x >= num_producer_warps * WARP_SIZE) {
             const int warp_id = (threadIdx.x - num_producer_warps * WARP_SIZE) / WARP_SIZE;
@@ -590,8 +601,8 @@ void RunAccuracyTestSquare(
                                     checkCuda(cudaMemcpy(mt.GetRes(), D, mem_size_d, cudaMemcpyDeviceToHost));
                                     count += mt.GetNumIncorrect(mt.GetRes(), dim, alpha, beta, atol);
                                 }
-                                printf("(%d, %d, %d, %d, %d): %.2f / %d\n", tile_dim, segment_k_dim, num_stages, num_producer_warps,
-                                    num_consumer_warps,  static_cast<float>(count) / num_reps, M * N);
+                                printf("(%d, %d, %d, %d, %d): %.2f / %d\n", tile_dim, segment_k_dim, num_stages,
+                                    num_producer_warps, num_consumer_warps,  static_cast<float>(count) / num_reps, M * N);
                             } else {
                                 checkCuda(cudaMemset(D, 0, mem_size_d));
                                 matmul_test::MatDim dim = mt.GetMatDimMax();
@@ -600,8 +611,8 @@ void RunAccuracyTestSquare(
                                     prop->multiProcessorCount);
                                 checkCuda(cudaMemcpy(mt.GetRes(), D, mem_size_d, cudaMemcpyDeviceToHost));
                                 count = mt.GetNumIncorrect(mt.GetRes(), dim, alpha, beta, atol);
-                                printf("(%d, %d, %d, %d, %d): %.2f / %d\n", tile_dim, segment_k_dim, num_stages, num_producer_warps,
-                                    num_consumer_warps,  static_cast<float>(count), M * N);
+                                printf("(%d, %d, %d, %d, %d): %.2f / %d\n", tile_dim, segment_k_dim, num_stages,
+                                    num_producer_warps, num_consumer_warps,  static_cast<float>(count), M * N);
                             }
                         }
                     }
@@ -718,10 +729,12 @@ int main(void) {
     int K = 1024;
 
     printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (1024, 1024, 1024), correctness:\n");
-    RunCorrectnessTestSquare<half, half>(&prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, 0.001f);
+    RunCorrectnessTestSquare<half, half>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, 0.001f);
 
 //    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (1024, 1024, 1024), correctness:\n");
-//    RunCorrectnessTestSquare<half, float>(&prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, 0.001f);
+//    RunCorrectnessTestSquare<half, float>(
+//        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, 0.001f);
 
     // Accuracy tests.
 
@@ -730,32 +743,38 @@ int main(void) {
     K = 256;
 
     printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (256, 256, 256), accuracy:\n");
-    RunAccuracyTestSquare<half, half>(&prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+    RunAccuracyTestSquare<half, half>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
 //    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (256, 256, 256), accuracy:\n");
-//    RunAccuracyTestSquare<half, float>(&prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+//    RunAccuracyTestSquare<half, float>(
+//        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     M = 512;
     N = 512;
     K = 512;
 
     printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (512, 512, 512), accuracy:\n");
-    RunAccuracyTestSquare<half, half>(&prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+    RunAccuracyTestSquare<half, half>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
 //    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (512, 512, 512), accuracy:\n");
-//    RunAccuracyTestSquare<half, float>(&prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
-//
-//    // Performance tests.
-//
-//    M = 16384;
-//    N = 16384;
-//    K = 16384;
-//
-//    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (16384, 16384, 16384), [TFLOPS]:\n");
-//    RunPerformanceTestSquare<half, half>(&prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
-//
+//    RunAccuracyTestSquare<half, float>(
+//        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+
+    // Performance tests.
+
+    M = 16384;
+    N = 16384;
+    K = 16384;
+
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (16384, 16384, 16384), [TFLOPS]:\n");
+    RunPerformanceTestSquare<half, half>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+
 //    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (16384, 16384, 16384), [TFLOPS]:\n");
-    //    RunPerformanceTestSquare<half, float>(&prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+//    RunPerformanceTestSquare<half, float>(
+//        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     return 0;
 }
