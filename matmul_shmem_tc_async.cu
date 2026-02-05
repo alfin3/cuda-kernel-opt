@@ -33,10 +33,7 @@ const int WMMA_N = 16;
 const int WMMA_K = 16;
 
 const int WARP_SIZE = 32;
-const int WARP_TILE_ROWS_MAX = 4;
-const int WARP_TILE_COLS_MAX = 4;
 const int NUM_STAGES_MAX = 16;
-
 const int SKEW_HALF = 16;
 
 inline
@@ -158,24 +155,26 @@ void produce(
     }
 }
 
-template<typename DT, typename DT_ACC>
+template<typename DT, typename DT_ACC, int NUM_ACC>
 __device__
 void consume(
     CudaBarrier* empty,
     CudaBarrier* full,
-    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, DT_ACC> warp_tile_c[WARP_TILE_ROWS_MAX][WARP_TILE_COLS_MAX],
+    wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, DT_ACC> warp_tile_c[NUM_ACC],
     const DT *shmem_ptr,
     int K,
     int rows,
     int cols,
     int shmem_stride,
     int num_stages,
-    int warp_tile_rows,
-    int warp_tile_cols,
     int warp_id) {
+    const int warp_tile_rows = NUM_ACC < 8 ? NUM_ACC / 2 : NUM_ACC / 4;
+    const int warp_tile_cols = NUM_ACC / warp_tile_rows;
+
     for (int i = 0; i < num_stages; ++i) {
         auto token = empty[i].arrive();
     }
+
     for (int segment_count = 0; segment_count < K / cols; ++segment_count) {
 
         full[segment_count % num_stages].arrive_and_wait();
@@ -184,8 +183,8 @@ void consume(
         const int shmem_stage_offset_b = shmem_stage_offset_a + num_stages * rows * shmem_stride;
 #pragma unroll
         for (int frag_tile_offset = 0; frag_tile_offset < cols; frag_tile_offset += WMMA_K) {
-            wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, DT, wmma::row_major> warp_tile_a[WARP_TILE_ROWS_MAX];
-            wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, DT, wmma::col_major> warp_tile_b[WARP_TILE_COLS_MAX];
+            wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, DT, wmma::row_major> warp_tile_a[warp_tile_rows];
+            wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, DT, wmma::col_major> warp_tile_b[warp_tile_cols];
 #pragma unroll
             for (int i = 0; i < warp_tile_rows; ++i) {
                 const int shmem_row_a = (warp_id / 2) * warp_tile_rows * WMMA_M + i * WMMA_M;
@@ -198,7 +197,8 @@ void consume(
                         wmma::load_matrix_sync(warp_tile_b[j],
                             shmem_ptr + shmem_stage_offset_b + (shmem_row_b * shmem_stride + frag_tile_offset), shmem_stride);
                     }
-                    wmma::mma_sync(warp_tile_c[i][j], warp_tile_a[i], warp_tile_b[j], warp_tile_c[i][j]);
+                    wmma::mma_sync(warp_tile_c[i * warp_tile_cols + j], warp_tile_a[i], warp_tile_b[j],
+                        warp_tile_c[i * warp_tile_cols + j]);
                 }
             }
         }
@@ -212,6 +212,7 @@ void consume(
 // producer warps, and the number of consumer warps, according to the following arguments:
 // DT: half,
 // DT_ACC: half or float,
+// NUM_ACC: 2, 4, 8, or 16 according to get_num_acc,
 // M, N, K: multiples of tile_dim,
 // tile_dim: 64 or 128,
 // segment_k_dim: (tile_dim / 2) increments,
@@ -219,7 +220,7 @@ void consume(
 // num_producer_warps: 1, 2, 4, or 8,
 // num_consumer_warps: 4 or 8,
 // The requested shared memory requirements are defined in get_shmem_req.
-template<typename DT, typename DT_ACC>
+template<typename DT, typename DT_ACC, int NUM_ACC>
 __global__
 void gemm_tensor_core_async_0_kernel(
     const DT *A,
@@ -237,13 +238,9 @@ void gemm_tensor_core_async_0_kernel(
     int num_producer_warps,
     int num_consumer_warps) {
 
-    // The dimensions of a warp tile computed by a warp are as follows:
-    // 4 warps, tile_dim 64 -> 2x2 in terms of fragment tiles,
-    // 8 warps, tile_dim 64 -> 1x2 in terms of fragment tiles,
-    // 4 warps, tile_dim 128 -> 4x4 in terms of fragment tiles,
-    // 8 warps, tile_dim 128 -> 2x4 in terms of fragment tiles.
-    const int warp_tile_cols = 4 >> (tile_dim == 64);
-    const int warp_tile_rows = warp_tile_cols >> (num_consumer_warps == 8);
+    // 2 -> 1 x 2, 4 -> 2 x 2, 8 -> 2 x 4, 16 -> 4 x 4.
+    const int warp_tile_rows = NUM_ACC < 8 ? NUM_ACC / 2 : NUM_ACC / 4;
+    const int warp_tile_cols = NUM_ACC / warp_tile_rows;
 
     // __align__(32) due to Tensor Cores and memcpy_async.
     // 2 * 16 (NUM_STAGES_MAX) * sizeof(CudaBarrier) maintains alignment regardless of CudaBarrier size.
@@ -274,7 +271,7 @@ void gemm_tensor_core_async_0_kernel(
 
         __syncthreads(); // A subset of __syncthreads() can be consumer barriers.
 
-        wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, DT_ACC> warp_tile_c[WARP_TILE_ROWS_MAX][WARP_TILE_COLS_MAX];
+        wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, DT_ACC> warp_tile_c[NUM_ACC];
 
         if (threadIdx.x >= num_producer_warps * WARP_SIZE) {
 
@@ -287,8 +284,8 @@ void gemm_tensor_core_async_0_kernel(
 #pragma unroll
                 for (int j = 0; j < warp_tile_cols; ++j) {
                     const int shmem_idx = shmem_offset_warp + i * WMMA_M * tile_dim + j * WMMA_N;
-                    wmma::load_matrix_sync(warp_tile_c[i][j], reinterpret_cast<const DT_ACC *>(&shmem[0]) + shmem_idx,
-                        tile_dim, wmma::mem_row_major);
+                    wmma::load_matrix_sync(warp_tile_c[i * warp_tile_cols + j],
+                        reinterpret_cast<const DT_ACC *>(&shmem[0]) + shmem_idx, tile_dim, wmma::mem_row_major);
                 }
             }
         }
@@ -301,8 +298,8 @@ void gemm_tensor_core_async_0_kernel(
 #pragma unroll
                 for (int j = 0; j < warp_tile_cols; ++j) {
 #pragma unroll
-                    for (int k = 0; k < warp_tile_c[i][j].num_elements; ++k) {
-                        warp_tile_c[i][j].x[k] *= beta;
+                    for (int k = 0; k < warp_tile_c[i * warp_tile_cols + j].num_elements; ++k) {
+                        warp_tile_c[i * warp_tile_cols + j].x[k] *= beta;
                     }
                 }
             }
@@ -318,8 +315,8 @@ void gemm_tensor_core_async_0_kernel(
                 (tile_offset_cd % N) * K, shmem_stride, SKEW_HALF, num_stages, num_producer_warps, warp_id, lane_id);
         } else {
             const int warp_id = (threadIdx.x - num_producer_warps * WARP_SIZE) / WARP_SIZE;
-            consume<DT, DT_ACC>(empty, full, warp_tile_c, shmem, K, tile_dim, segment_k_dim, shmem_stride, num_stages,
-                warp_tile_rows, warp_tile_cols, warp_id);
+            consume<DT, DT_ACC, NUM_ACC>(empty, full, warp_tile_c, shmem, K, tile_dim, segment_k_dim, shmem_stride,
+                num_stages, warp_id);
         }
 
         __syncthreads();
@@ -340,12 +337,12 @@ void gemm_tensor_core_async_0_kernel(
 #pragma unroll
                 for (int j = 0; j < warp_tile_cols; ++j) {
 #pragma unroll
-                    for (int k = 0; k < warp_tile_c[i][j].num_elements; ++k) {
-                        warp_tile_c[i][j].x[k] *= alpha;
+                    for (int k = 0; k < warp_tile_c[i * warp_tile_cols + j].num_elements; ++k) {
+                        warp_tile_c[i * warp_tile_cols + j].x[k] *= alpha;
                     }
                     const int shmem_idx = shmem_offset_warp + i * WMMA_M * tile_dim + j * WMMA_N;
-                    wmma::store_matrix_sync(reinterpret_cast<DT_ACC *>(&shmem[0]) + shmem_idx, warp_tile_c[i][j],
-                        tile_dim, wmma::mem_row_major);
+                    wmma::store_matrix_sync(reinterpret_cast<DT_ACC *>(&shmem[0]) + shmem_idx,
+                        warp_tile_c[i * warp_tile_cols + j], tile_dim, wmma::mem_row_major);
                 }
             }
         }
@@ -366,7 +363,7 @@ void gemm_tensor_core_async_0_kernel(
 
 template
 __global__
-void gemm_tensor_core_async_0_kernel<half, float>(
+void gemm_tensor_core_async_0_kernel<half, float, 2>(
     const half *A,
     const half *B,
     const float *C,
@@ -383,7 +380,109 @@ void gemm_tensor_core_async_0_kernel<half, float>(
     int num_consumer_warps);
 template
 __global__
-void gemm_tensor_core_async_0_kernel<half, half>(
+void gemm_tensor_core_async_0_kernel<half, float, 4>(
+    const half *A,
+    const half *B,
+    const float *C,
+    float *D,
+    float alpha,
+    float beta,
+    int M,
+    int N,
+    int K,
+    int tile_dim,
+    int segment_k_dim,
+    int num_stages,
+    int num_producer_warps,
+    int num_consumer_warps);
+template
+__global__
+void gemm_tensor_core_async_0_kernel<half, float, 8>(
+    const half *A,
+    const half *B,
+    const float *C,
+    float *D,
+    float alpha,
+    float beta,
+    int M,
+    int N,
+    int K,
+    int tile_dim,
+    int segment_k_dim,
+    int num_stages,
+    int num_producer_warps,
+    int num_consumer_warps);
+template
+__global__
+void gemm_tensor_core_async_0_kernel<half, float, 16>(
+    const half *A,
+    const half *B,
+    const float *C,
+    float *D,
+    float alpha,
+    float beta,
+    int M,
+    int N,
+    int K,
+    int tile_dim,
+    int segment_k_dim,
+    int num_stages,
+    int num_producer_warps,
+    int num_consumer_warps);
+template
+__global__
+void gemm_tensor_core_async_0_kernel<half, half, 2>(
+    const half *A,
+    const half *B,
+    const half *C,
+    half *D,
+    half alpha,
+    half beta,
+    int M,
+    int N,
+    int K,
+    int tile_dim,
+    int segment_k_dim,
+    int num_stages,
+    int num_producer_warps,
+    int num_consumer_warps);
+template
+__global__
+void gemm_tensor_core_async_0_kernel<half, half, 4>(
+    const half *A,
+    const half *B,
+    const half *C,
+    half *D,
+    half alpha,
+    half beta,
+    int M,
+    int N,
+    int K,
+    int tile_dim,
+    int segment_k_dim,
+    int num_stages,
+    int num_producer_warps,
+    int num_consumer_warps);
+template
+__global__
+void gemm_tensor_core_async_0_kernel<half, half, 8>(
+    const half *A,
+    const half *B,
+    const half *C,
+    half *D,
+    half alpha,
+    half beta,
+    int M,
+    int N,
+    int K,
+    int tile_dim,
+    int segment_k_dim,
+    int num_stages,
+    int num_producer_warps,
+    int num_consumer_warps);
+template
+__global__
+void gemm_tensor_core_async_0_kernel<half, half, 16>(
     const half *A,
     const half *B,
     const half *C,
@@ -405,6 +504,10 @@ int get_shmem_req(int tile_dim, int segment_k_dim, int num_stages) {
         num_stages * (2 * tile_dim * (segment_k_dim + SKEW_HALF) * sizeof(DT)) + 2 * NUM_STAGES_MAX * sizeof(CudaBarrier);
     const int size_cd = tile_dim * tile_dim * sizeof(DT_ACC) + 2 * NUM_STAGES_MAX * sizeof(CudaBarrier);
     return size_ab > size_cd ? size_ab : size_cd;
+}
+
+int get_num_acc(int tile_dim, int num_consumer_warps) {
+    return (4 >> (tile_dim == 64)) * ((4 >> (tile_dim == 64)) >> (num_consumer_warps == 8));
 }
 
 template<typename DT, typename DT_ACC>
@@ -432,29 +535,44 @@ void gemm_tensor_core_0(
     assert(num_producer_warps == 1 || num_producer_warps == 2 || num_producer_warps == 4 ||num_producer_warps == 8);
     assert(num_consumer_warps == 4 || num_consumer_warps == 8);
 
-    //Ampere: 164 * 1024, Ada: 100 * 1024.
     const int shmem_req = get_shmem_req<DT, DT_ACC>(tile_dim, segment_k_dim, num_stages);
+    const int num_acc = get_num_acc(tile_dim, num_consumer_warps);
     dim3 gridDim(num_sms, 1, 1);
     dim3 blockDim((num_producer_warps + num_consumer_warps) * WARP_SIZE, 1, 1);
     if (shmem_req > 48 * 1024) {
-        checkCuda(cudaFuncSetAttribute(gemm_tensor_core_async_0_kernel<DT, DT_ACC>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_req));
+        if (num_acc == 2) {
+            checkCuda(cudaFuncSetAttribute(gemm_tensor_core_async_0_kernel<DT, DT_ACC, 2>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_req));
+        }
+        if (num_acc == 4) {
+            checkCuda(cudaFuncSetAttribute(gemm_tensor_core_async_0_kernel<DT, DT_ACC, 4>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_req));
+        }
+        if (num_acc == 8) {
+            checkCuda(cudaFuncSetAttribute(gemm_tensor_core_async_0_kernel<DT, DT_ACC, 8>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_req));
+        }
+        if (num_acc == 16) {
+            checkCuda(cudaFuncSetAttribute(gemm_tensor_core_async_0_kernel<DT, DT_ACC, 16>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_req));
+        }
     }
-    gemm_tensor_core_async_0_kernel<DT, DT_ACC><<<gridDim, blockDim, shmem_req>>>(
-        A,
-        B,
-        C,
-        D,
-        alpha,
-        beta,
-        M,
-        N,
-        K,
-        tile_dim,
-        segment_k_dim,
-        num_stages,
-        num_producer_warps,
-        num_consumer_warps);
+    if (num_acc == 2) {
+        gemm_tensor_core_async_0_kernel<DT, DT_ACC, 2><<<gridDim, blockDim, shmem_req>>>(
+            A, B, C, D, alpha, beta, M, N, K, tile_dim, segment_k_dim, num_stages, num_producer_warps, num_consumer_warps);
+    }
+    if (num_acc == 4) {
+        gemm_tensor_core_async_0_kernel<DT, DT_ACC, 4><<<gridDim, blockDim, shmem_req>>>(
+            A, B, C, D, alpha, beta, M, N, K, tile_dim, segment_k_dim, num_stages, num_producer_warps, num_consumer_warps);
+    }
+    if (num_acc == 8) {
+        gemm_tensor_core_async_0_kernel<DT, DT_ACC, 8><<<gridDim, blockDim, shmem_req>>>(
+            A, B, C, D, alpha, beta, M, N, K, tile_dim, segment_k_dim, num_stages, num_producer_warps, num_consumer_warps);
+    }
+    if (num_acc == 16) {
+        gemm_tensor_core_async_0_kernel<DT, DT_ACC, 16><<<gridDim, blockDim, shmem_req>>>(
+            A, B, C, D, alpha, beta, M, N, K, tile_dim, segment_k_dim, num_stages, num_producer_warps, num_consumer_warps);
+    }
 }
 
 template<typename DT, typename DT_ACC>
@@ -732,9 +850,9 @@ int main(void) {
     RunCorrectnessTestSquare<half, half>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, 0.001f);
 
-//    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (1024, 1024, 1024), correctness:\n");
-//    RunCorrectnessTestSquare<half, float>(
-//        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, 0.001f);
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (1024, 1024, 1024), correctness:\n");
+    RunCorrectnessTestSquare<half, float>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, 0.001f);
 
     // Accuracy tests.
 
@@ -746,9 +864,9 @@ int main(void) {
     RunAccuracyTestSquare<half, half>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
-//    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (256, 256, 256), accuracy:\n");
-//    RunAccuracyTestSquare<half, float>(
-//        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (256, 256, 256), accuracy:\n");
+    RunAccuracyTestSquare<half, float>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     M = 512;
     N = 512;
@@ -758,9 +876,9 @@ int main(void) {
     RunAccuracyTestSquare<half, half>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
-//    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (512, 512, 512), accuracy:\n");
-//    RunAccuracyTestSquare<half, float>(
-//        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (512, 512, 512), accuracy:\n");
+    RunAccuracyTestSquare<half, float>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     // Performance tests.
 
@@ -772,9 +890,9 @@ int main(void) {
     RunPerformanceTestSquare<half, half>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
-//    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (16384, 16384, 16384), [TFLOPS]:\n");
-//    RunPerformanceTestSquare<half, float>(
-//        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (16384, 16384, 16384), [TFLOPS]:\n");
+    RunPerformanceTestSquare<half, float>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     return 0;
 }
