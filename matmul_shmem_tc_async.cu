@@ -1,15 +1,20 @@
 // GEMM (D = alpha * A * B + beta * C) using shared memory and Tensor Cores, as well as various methods
 // to overlap computation with data movement.
 //
-// The kernel enables changing i) the square tile dimension from 64 to 128, ii) the segment of the K
-// dimension loaded into the shared memory, and iii) the number of warps from 4 to 8, while providing
-// vectorized and coalesced (to the extent possible) load and store accesses for copying data from/to
+// The kernel enables changing the following parameter values:
+//     -  the square tile dimension from 64 to 128,
+//     -  the segment of the K dimension loaded into the shared memory in (tile dimension / 2) increments,
+//     -  the number of pipeline stages in [1, 16],
+//     -  the number of producer warps in [1, 8], and
+//     -  the number of the consumer warps from 4 to 8,
+// while providing vectorized and coalesced (to the extent possible) accesses for data movement to/from
 // shared memory.
 //
-// This design enables tuning the Tensor Cores workload that each warp executes. Doubling the tile
-// dimension increases the warp tile computed by a warp by a factor of 4, and doubling the
-// number of warps decreases the warp tile by a factor of 2, thereby enabling to gradually tune the
-// Tensor Cores workload that each warp executes.
+// This design enables tuning the Tensor Cores workload that each warp executes within the available
+// number of registers. Doubling the tile dimension increases the array of accumulators that a warp
+// computes by a factor of 4, and doubling the number of warps decreases the array of accumulators
+// that a warp computes by a factor of 2, thereby enabling to gradually tune the Tensor Cores workload
+// that each warp executes.
 //
 // The input matrices can be of float and half types.
 //
@@ -32,9 +37,10 @@ const int WMMA_M = 16;
 const int WMMA_N = 16;
 const int WMMA_K = 16;
 
-const int WARP_SIZE = 32;
 const int NUM_STAGES_MAX = 16;
+const int SHMEM_ALIGNMENT = 32;
 const int SKEW_HALF = 16;
+const int WARP_SIZE = 32;
 
 inline
 cudaError_t checkCuda(cudaError_t res) {
@@ -49,33 +55,10 @@ cudaError_t checkCuda(cudaError_t res) {
 
 template<typename DT>
 __device__
-void load_tile(
-    DT *shmem_ptr,
-    const DT *a_ptr,
-    int rows,
-    int cols,
-    int offset_a,
-    int stride_am,
-    int shmem_skew, // SKEW_HALF for A and B tiles, and 0 for C tiles.
-    int num_warps,
-    int warp_id,
-    int lane_id) {
-    const int len_vec = sizeof(int4) / sizeof(DT);
-#pragma unroll
-    for (int shmem_offset = 0; shmem_offset < rows * cols; shmem_offset += num_warps * WARP_SIZE * len_vec) {
-        const int temp = shmem_offset + (warp_id * WARP_SIZE + lane_id) * len_vec;
-        const int shmem_idx = temp + (temp / cols) * shmem_skew;
-        const int idx = offset_a + (temp / cols) * stride_am + temp % cols;
-        *reinterpret_cast<int4 *>(shmem_ptr + shmem_idx) = *reinterpret_cast<const int4 *>(a_ptr + idx);
-    }
-}
-
-template<typename DT>
-__device__
 void load_tile_async(
     CudaBarrier& bar,
-    DT *shmem_ptr,
-    const DT *a_ptr,
+    DT * __restrict__ shmem_ptr,
+    const DT * __restrict__ a_ptr,
     int rows,
     int cols,
     int offset_a,
@@ -98,8 +81,8 @@ void load_tile_async(
 template<typename DT>
 __device__
 void store_tile(
-    DT *a_ptr,
-    const DT *shmem_ptr,
+    DT * __restrict__ a_ptr,
+    const DT * __restrict__ shmem_ptr,
     int rows,
     int cols,
     int offset_a,
@@ -121,8 +104,8 @@ void store_tile(
 template<typename DT>
 __device__
 void produce(
-    CudaBarrier* empty,
-    CudaBarrier* full,
+    CudaBarrier *empty,
+    CudaBarrier *full,
     DT *shmem_ptr,
     const DT *a_ptr,
     const DT *b_ptr,
@@ -153,13 +136,19 @@ void produce(
 
         auto token = full[segment_count % num_stages].arrive();
     }
+
+    // If a producer thread arrived here, then all threads already arrived at the last instance of
+    // empty barrier and the empty barriers can be reset for the next tile.
+    for (int i = 0; i < num_stages; ++i) {
+        auto token = empty[i].arrive();
+    }
 }
 
 template<typename DT, typename DT_ACC, int NUM_ACC>
 __device__
 void consume(
-    CudaBarrier* empty,
-    CudaBarrier* full,
+    CudaBarrier *empty,
+    CudaBarrier *full,
     wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, DT_ACC> warp_tile_c[NUM_ACC],
     const DT *shmem_ptr,
     int K,
@@ -244,13 +233,18 @@ void gemm_tensor_core_async_0_kernel(
 
     // __align__(32) due to Tensor Cores and memcpy_async.
     // 2 * 16 (NUM_STAGES_MAX) * sizeof(CudaBarrier) maintains alignment regardless of CudaBarrier size.
-    extern __shared__ __align__(32) char shmem_[];
-    CudaBarrier *empty = reinterpret_cast<CudaBarrier *>(&shmem_[0]);
-    CudaBarrier *full = reinterpret_cast<CudaBarrier *>(&shmem_[NUM_STAGES_MAX * sizeof(CudaBarrier)]);
-    DT* shmem = reinterpret_cast<DT *>(&shmem_[2 * NUM_STAGES_MAX * sizeof(CudaBarrier)]);
+    extern __shared__ __align__(SHMEM_ALIGNMENT) char shmem_[];
+    CudaBarrier *bar_consumer = reinterpret_cast<CudaBarrier *>(&shmem_[0]);
+    CudaBarrier *empty = reinterpret_cast<CudaBarrier *>(&shmem_[1 * sizeof(CudaBarrier)]);
+    CudaBarrier *full = reinterpret_cast<CudaBarrier *>(&shmem_[(1 + NUM_STAGES_MAX) * sizeof(CudaBarrier)]);
+    const int bar_alloc_size = (1 + 2 * NUM_STAGES_MAX) * sizeof(CudaBarrier);
+    DT *shmem = reinterpret_cast<DT *>(&shmem_[bar_alloc_size + bar_alloc_size % SHMEM_ALIGNMENT]);
 
-    if (threadIdx.x < 2 * NUM_STAGES_MAX) { // The first warp.
+    if (threadIdx.x < 2 * NUM_STAGES_MAX) {
         init(&empty[threadIdx.x], (num_producer_warps + num_consumer_warps) * WARP_SIZE);
+    }
+    if (threadIdx.x == 2 * NUM_STAGES_MAX) {
+        init(bar_consumer, (num_consumer_warps) * WARP_SIZE);
     }
 
     __syncthreads();
@@ -262,21 +256,18 @@ void gemm_tensor_core_async_0_kernel(
         const int tile_offset_cd =
             ((num_tiles_prev + blockIdx.x) * tile_dim) / N * tile_dim * N  + ((num_tiles_prev + blockIdx.x) * tile_dim) % N;
 
-        if (threadIdx.x >= num_producer_warps * WARP_SIZE) {
-            const int warp_id = (threadIdx.x - num_producer_warps * WARP_SIZE) / WARP_SIZE;
-            const int lane_id = threadIdx.x % WARP_SIZE;
-            load_tile<DT_ACC>(reinterpret_cast<DT_ACC *>(&shmem[0]), C,
-                tile_dim, tile_dim, tile_offset_cd, N, 0, num_consumer_warps, warp_id, lane_id);
-        }
-
-        __syncthreads(); // A subset of __syncthreads() can be consumer barriers.
-
         wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, DT_ACC> warp_tile_c[NUM_ACC];
 
         if (threadIdx.x >= num_producer_warps * WARP_SIZE) {
+            const int warp_id = (threadIdx.x - num_producer_warps * WARP_SIZE) / WARP_SIZE;
+            const int lane_id = threadIdx.x % WARP_SIZE;
+
+            load_tile_async<DT_ACC>(*bar_consumer, reinterpret_cast<DT_ACC *>(shmem), C,
+                tile_dim, tile_dim, tile_offset_cd, N, 0, num_consumer_warps, warp_id, lane_id);
+
+            bar_consumer->arrive_and_wait();
 
             // There are two columns of warp tiles in a tile.
-            const int warp_id = (threadIdx.x - num_producer_warps * WARP_SIZE) / WARP_SIZE;
             const int shmem_offset_warp =
                 (warp_id / 2) * (tile_dim * warp_tile_rows * WMMA_M) + (warp_id % 2) * (warp_tile_cols * WMMA_N);
 #pragma unroll
@@ -285,14 +276,12 @@ void gemm_tensor_core_async_0_kernel(
                 for (int j = 0; j < warp_tile_cols; ++j) {
                     const int shmem_idx = shmem_offset_warp + i * WMMA_M * tile_dim + j * WMMA_N;
                     wmma::load_matrix_sync(warp_tile_c[i * warp_tile_cols + j],
-                        reinterpret_cast<const DT_ACC *>(&shmem[0]) + shmem_idx, tile_dim, wmma::mem_row_major);
+                        reinterpret_cast<const DT_ACC *>(shmem) + shmem_idx, tile_dim, wmma::mem_row_major);
                 }
             }
-        }
 
-        __syncthreads();
+            bar_consumer->arrive_and_wait();
 
-        if (threadIdx.x >= num_producer_warps * WARP_SIZE) {
 #pragma unroll
             for (int i = 0; i < warp_tile_rows; ++i) {
 #pragma unroll
@@ -304,7 +293,7 @@ void gemm_tensor_core_async_0_kernel(
                 }
             }
         }
-        // Empty barriers block all threads and __syncthreads() is not necessary.
+        // Empty barriers block the producer threads until all consumer threads arrive.
 
         // Copy the tiles of A and B into the shared memory, iterating in the K dimension.
         const int shmem_stride = segment_k_dim + SKEW_HALF;
@@ -319,19 +308,15 @@ void gemm_tensor_core_async_0_kernel(
                 num_stages, warp_id);
         }
 
-        __syncthreads();
-        if (threadIdx.x < num_producer_warps * WARP_SIZE) {
-            for (int i = 0; i < num_stages; ++i) {
-                auto token = empty[i].arrive();
-            }
-        }
-        // All threads of the consumer warps completed matrix multiply and accumulate, and
-        // the empty barriers were reset for the next tile to be computed on the current SM.
-
         if (threadIdx.x >= num_producer_warps * WARP_SIZE) {
             const int warp_id = (threadIdx.x - num_producer_warps * WARP_SIZE) / WARP_SIZE;
+            const int lane_id = threadIdx.x % WARP_SIZE;
             const int shmem_offset_warp =
                 (warp_id / 2) * (tile_dim * warp_tile_rows * WMMA_M) + (warp_id % 2) * (warp_tile_cols * WMMA_N);
+
+            bar_consumer->arrive_and_wait();
+            // All consumer threads completed matrix multiply and accumulate.
+
 #pragma unroll
             for (int i = 0; i < warp_tile_rows; ++i) {
 #pragma unroll
@@ -341,19 +326,15 @@ void gemm_tensor_core_async_0_kernel(
                         warp_tile_c[i * warp_tile_cols + j].x[k] *= alpha;
                     }
                     const int shmem_idx = shmem_offset_warp + i * WMMA_M * tile_dim + j * WMMA_N;
-                    wmma::store_matrix_sync(reinterpret_cast<DT_ACC *>(&shmem[0]) + shmem_idx,
+                    wmma::store_matrix_sync(reinterpret_cast<DT_ACC *>(shmem) + shmem_idx,
                         warp_tile_c[i * warp_tile_cols + j], tile_dim, wmma::mem_row_major);
                 }
             }
-        }
 
-        __syncthreads();
+            bar_consumer->arrive_and_wait();
 
-        // Store the tile, consisting of warp tiles, from shared memory to D.
-        if (threadIdx.x >= num_producer_warps * WARP_SIZE) {
-            const int warp_id = (threadIdx.x - num_producer_warps * WARP_SIZE) / WARP_SIZE;
-            const int lane_id = threadIdx.x % WARP_SIZE;
-            store_tile<DT_ACC>(D, reinterpret_cast<const DT_ACC *>(&shmem[0]),
+            // Store the tile, consisting of warp tiles, from shared memory to D.
+            store_tile<DT_ACC>(D, reinterpret_cast<const DT_ACC *>(shmem),
                 tile_dim, tile_dim, tile_offset_cd, N, 0, num_consumer_warps, warp_id, lane_id);
         }
 
@@ -500,9 +481,11 @@ void gemm_tensor_core_async_0_kernel<half, half, 16>(
 
 template<typename DT, typename DT_ACC>
 int get_shmem_req(int tile_dim, int segment_k_dim, int num_stages) {
+    const int bar_alloc_size = (1 + 2 * NUM_STAGES_MAX) * sizeof(CudaBarrier);
+    const int bar_alloc_size_aligned = bar_alloc_size + bar_alloc_size % SHMEM_ALIGNMENT;
     const int size_ab =
-        num_stages * (2 * tile_dim * (segment_k_dim + SKEW_HALF) * sizeof(DT)) + 2 * NUM_STAGES_MAX * sizeof(CudaBarrier);
-    const int size_cd = tile_dim * tile_dim * sizeof(DT_ACC) + 2 * NUM_STAGES_MAX * sizeof(CudaBarrier);
+        num_stages * (2 * tile_dim * (segment_k_dim + SKEW_HALF) * sizeof(DT)) + bar_alloc_size_aligned;
+    const int size_cd = tile_dim * tile_dim * sizeof(DT_ACC) + bar_alloc_size_aligned;
     return size_ab > size_cd ? size_ab : size_cd;
 }
 
@@ -837,6 +820,7 @@ int main(void) {
     checkCuda(cudaGetDeviceProperties(&prop, devId));
     printf("\nDevice: %s\n", prop.name);
     printf("\nsharedMemPerMultiprocessor: %lu\n", prop.sharedMemPerMultiprocessor);
+    printf("\nregsPerBlock: %d\n", prop.regsPerBlock);
     printf("\nmultiProcessorCount: %d\n", prop.multiProcessorCount);
     checkCuda(cudaSetDevice(devId));
 
