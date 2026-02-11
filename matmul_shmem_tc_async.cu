@@ -6,7 +6,7 @@
 //     -  the segment of the K dimension loaded into the shared memory in (tile dimension / 2) increments,
 //     -  the number of pipeline stages in [1, 16],
 //     -  the number of producer warps in [1, 8], and
-//     -  the number of the consumer warps from 4 to 8,
+//     -  the number of consumer warps from 4 to 8,
 // while providing vectorized and coalesced (to the extent possible) accesses for data movement to/from
 // shared memory.
 //
@@ -197,21 +197,20 @@ void consume(
 }
 
 // Computes GEMM (D = alpha * A * B + beta * C) with Tensor Cores. Enables tuning the matrix multiply
-// and accumulate workload of a warp, and changing the number of pipeline stages, the number of
-// producer warps, and the number of consumer warps, according to the following arguments:
+// and accumulate workload of a warp, and setting the following parameters:
 // DT: half,
 // DT_ACC: half or float,
 // NUM_ACC: 2, 4, 8, or 16 according to get_num_acc,
 // M, N, K: multiples of tile_dim,
 // tile_dim: 64 or 128,
-// segment_k_dim: (tile_dim / 2) increments,
+// segment_dim_k: (tile_dim / 2) increments,
 // num_stages: [1, 16],
 // num_producer_warps: 1, 2, 4, or 8,
 // num_consumer_warps: 4 or 8,
 // The requested shared memory requirements are defined in get_shmem_req.
 template<typename DT, typename DT_ACC, int NUM_ACC>
 __global__
-void gemm_tensor_core_async_0_kernel(
+void gemm_shmem_tc_async_kernel(
     const DT *A,
     const DT *B, // Transpose.
     const DT_ACC *C,
@@ -222,7 +221,7 @@ void gemm_tensor_core_async_0_kernel(
     int N,
     int K,
     int tile_dim,
-    int segment_k_dim,
+    int segment_dim_k,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps) {
@@ -232,7 +231,6 @@ void gemm_tensor_core_async_0_kernel(
     const int warp_tile_cols = NUM_ACC / warp_tile_rows;
 
     // __align__(32) due to Tensor Cores and memcpy_async.
-    // 2 * 16 (NUM_STAGES_MAX) * sizeof(CudaBarrier) maintains alignment regardless of CudaBarrier size.
     extern __shared__ __align__(SHMEM_ALIGNMENT) char shmem_[];
     CudaBarrier *bar_consumer = reinterpret_cast<CudaBarrier *>(&shmem_[0]);
     CudaBarrier *empty = reinterpret_cast<CudaBarrier *>(&shmem_[1 * sizeof(CudaBarrier)]);
@@ -296,15 +294,15 @@ void gemm_tensor_core_async_0_kernel(
         // Empty barriers block the producer threads until all consumer threads arrive.
 
         // Copy the tiles of A and B into the shared memory, iterating in the K dimension.
-        const int shmem_stride = segment_k_dim + SKEW_HALF;
+        const int shmem_stride = segment_dim_k + SKEW_HALF;
         if (threadIdx.x < num_producer_warps * WARP_SIZE) {
             const int warp_id = threadIdx.x / WARP_SIZE;
             const int lane_id = threadIdx.x % WARP_SIZE;
-            produce<DT>(empty, full, shmem, A, B, K, tile_dim, segment_k_dim, (tile_offset_cd / N) * K,
+            produce<DT>(empty, full, shmem, A, B, K, tile_dim, segment_dim_k, (tile_offset_cd / N) * K,
                 (tile_offset_cd % N) * K, shmem_stride, SKEW_HALF, num_stages, num_producer_warps, warp_id, lane_id);
         } else {
             const int warp_id = (threadIdx.x - num_producer_warps * WARP_SIZE) / WARP_SIZE;
-            consume<DT, DT_ACC, NUM_ACC>(empty, full, warp_tile_c, shmem, K, tile_dim, segment_k_dim, shmem_stride,
+            consume<DT, DT_ACC, NUM_ACC>(empty, full, warp_tile_c, shmem, K, tile_dim, segment_dim_k, shmem_stride,
                 num_stages, warp_id);
         }
 
@@ -344,7 +342,7 @@ void gemm_tensor_core_async_0_kernel(
 
 template
 __global__
-void gemm_tensor_core_async_0_kernel<half, float, 2>(
+void gemm_shmem_tc_async_kernel<half, float, 2>(
     const half *A,
     const half *B,
     const float *C,
@@ -355,13 +353,13 @@ void gemm_tensor_core_async_0_kernel<half, float, 2>(
     int N,
     int K,
     int tile_dim,
-    int segment_k_dim,
+    int segment_dim_k,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps);
 template
 __global__
-void gemm_tensor_core_async_0_kernel<half, float, 4>(
+void gemm_shmem_tc_async_kernel<half, float, 4>(
     const half *A,
     const half *B,
     const float *C,
@@ -372,13 +370,13 @@ void gemm_tensor_core_async_0_kernel<half, float, 4>(
     int N,
     int K,
     int tile_dim,
-    int segment_k_dim,
+    int segment_dim_k,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps);
 template
 __global__
-void gemm_tensor_core_async_0_kernel<half, float, 8>(
+void gemm_shmem_tc_async_kernel<half, float, 8>(
     const half *A,
     const half *B,
     const float *C,
@@ -389,13 +387,13 @@ void gemm_tensor_core_async_0_kernel<half, float, 8>(
     int N,
     int K,
     int tile_dim,
-    int segment_k_dim,
+    int segment_dim_k,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps);
 template
 __global__
-void gemm_tensor_core_async_0_kernel<half, float, 16>(
+void gemm_shmem_tc_async_kernel<half, float, 16>(
     const half *A,
     const half *B,
     const float *C,
@@ -406,13 +404,13 @@ void gemm_tensor_core_async_0_kernel<half, float, 16>(
     int N,
     int K,
     int tile_dim,
-    int segment_k_dim,
+    int segment_dim_k,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps);
 template
 __global__
-void gemm_tensor_core_async_0_kernel<half, half, 2>(
+void gemm_shmem_tc_async_kernel<half, half, 2>(
     const half *A,
     const half *B,
     const half *C,
@@ -423,13 +421,13 @@ void gemm_tensor_core_async_0_kernel<half, half, 2>(
     int N,
     int K,
     int tile_dim,
-    int segment_k_dim,
+    int segment_dim_k,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps);
 template
 __global__
-void gemm_tensor_core_async_0_kernel<half, half, 4>(
+void gemm_shmem_tc_async_kernel<half, half, 4>(
     const half *A,
     const half *B,
     const half *C,
@@ -440,13 +438,13 @@ void gemm_tensor_core_async_0_kernel<half, half, 4>(
     int N,
     int K,
     int tile_dim,
-    int segment_k_dim,
+    int segment_dim_k,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps);
 template
 __global__
-void gemm_tensor_core_async_0_kernel<half, half, 8>(
+void gemm_shmem_tc_async_kernel<half, half, 8>(
     const half *A,
     const half *B,
     const half *C,
@@ -457,13 +455,13 @@ void gemm_tensor_core_async_0_kernel<half, half, 8>(
     int N,
     int K,
     int tile_dim,
-    int segment_k_dim,
+    int segment_dim_k,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps);
 template
 __global__
-void gemm_tensor_core_async_0_kernel<half, half, 16>(
+void gemm_shmem_tc_async_kernel<half, half, 16>(
     const half *A,
     const half *B,
     const half *C,
@@ -474,17 +472,17 @@ void gemm_tensor_core_async_0_kernel<half, half, 16>(
     int N,
     int K,
     int tile_dim,
-    int segment_k_dim,
+    int segment_dim_k,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps);
 
 template<typename DT, typename DT_ACC>
-int get_shmem_req(int tile_dim, int segment_k_dim, int num_stages) {
+int get_shmem_req(int tile_dim, int segment_dim_k, int num_stages) {
     const int bar_alloc_size = (1 + 2 * NUM_STAGES_MAX) * sizeof(CudaBarrier);
     const int bar_alloc_size_aligned = bar_alloc_size + bar_alloc_size % SHMEM_ALIGNMENT;
     const int size_ab =
-        num_stages * (2 * tile_dim * (segment_k_dim + SKEW_HALF) * sizeof(DT)) + bar_alloc_size_aligned;
+        num_stages * (2 * tile_dim * (segment_dim_k + SKEW_HALF) * sizeof(DT)) + bar_alloc_size_aligned;
     const int size_cd = tile_dim * tile_dim * sizeof(DT_ACC) + bar_alloc_size_aligned;
     return size_ab > size_cd ? size_ab : size_cd;
 }
@@ -494,7 +492,7 @@ int get_num_acc(int tile_dim, int num_consumer_warps) {
 }
 
 template<typename DT, typename DT_ACC>
-void gemm_tensor_core_0(
+void gemm_shmem_tc_async(
     const DT *A,
     const DT *B, // Transpose.
     const DT_ACC *C,
@@ -505,56 +503,56 @@ void gemm_tensor_core_0(
     int N,
     int K,
     int tile_dim,
-    int segment_k_dim,
+    int segment_dim_k,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps,
     int num_sms) {
     assert(tile_dim == 64 || tile_dim == 128);
-    assert(!(segment_k_dim % (tile_dim / 2)));
+    assert(!(segment_dim_k % (tile_dim / 2)));
     assert(!(M % tile_dim || N % tile_dim));
-    assert(!(K % segment_k_dim));
+    assert(!(K % segment_dim_k));
     assert(num_stages > 0 || num_stages <= NUM_STAGES_MAX);
     assert(num_producer_warps == 1 || num_producer_warps == 2 || num_producer_warps == 4 ||num_producer_warps == 8);
     assert(num_consumer_warps == 4 || num_consumer_warps == 8);
 
-    const int shmem_req = get_shmem_req<DT, DT_ACC>(tile_dim, segment_k_dim, num_stages);
+    const int shmem_req = get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, num_stages);
     const int num_acc = get_num_acc(tile_dim, num_consumer_warps);
     dim3 gridDim(num_sms, 1, 1);
     dim3 blockDim((num_producer_warps + num_consumer_warps) * WARP_SIZE, 1, 1);
     if (shmem_req > 48 * 1024) {
         if (num_acc == 2) {
-            checkCuda(cudaFuncSetAttribute(gemm_tensor_core_async_0_kernel<DT, DT_ACC, 2>,
+            checkCuda(cudaFuncSetAttribute(gemm_shmem_tc_async_kernel<DT, DT_ACC, 2>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_req));
         }
         if (num_acc == 4) {
-            checkCuda(cudaFuncSetAttribute(gemm_tensor_core_async_0_kernel<DT, DT_ACC, 4>,
+            checkCuda(cudaFuncSetAttribute(gemm_shmem_tc_async_kernel<DT, DT_ACC, 4>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_req));
         }
         if (num_acc == 8) {
-            checkCuda(cudaFuncSetAttribute(gemm_tensor_core_async_0_kernel<DT, DT_ACC, 8>,
+            checkCuda(cudaFuncSetAttribute(gemm_shmem_tc_async_kernel<DT, DT_ACC, 8>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_req));
         }
         if (num_acc == 16) {
-            checkCuda(cudaFuncSetAttribute(gemm_tensor_core_async_0_kernel<DT, DT_ACC, 16>,
+            checkCuda(cudaFuncSetAttribute(gemm_shmem_tc_async_kernel<DT, DT_ACC, 16>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_req));
         }
     }
     if (num_acc == 2) {
-        gemm_tensor_core_async_0_kernel<DT, DT_ACC, 2><<<gridDim, blockDim, shmem_req>>>(
-            A, B, C, D, alpha, beta, M, N, K, tile_dim, segment_k_dim, num_stages, num_producer_warps, num_consumer_warps);
+        gemm_shmem_tc_async_kernel<DT, DT_ACC, 2><<<gridDim, blockDim, shmem_req>>>(A, B, C, D, alpha, beta,
+            M, N, K, tile_dim, segment_dim_k, num_stages, num_producer_warps, num_consumer_warps);
     }
     if (num_acc == 4) {
-        gemm_tensor_core_async_0_kernel<DT, DT_ACC, 4><<<gridDim, blockDim, shmem_req>>>(
-            A, B, C, D, alpha, beta, M, N, K, tile_dim, segment_k_dim, num_stages, num_producer_warps, num_consumer_warps);
+        gemm_shmem_tc_async_kernel<DT, DT_ACC, 4><<<gridDim, blockDim, shmem_req>>>(A, B, C, D, alpha, beta,
+            M, N, K, tile_dim, segment_dim_k, num_stages, num_producer_warps, num_consumer_warps);
     }
     if (num_acc == 8) {
-        gemm_tensor_core_async_0_kernel<DT, DT_ACC, 8><<<gridDim, blockDim, shmem_req>>>(
-            A, B, C, D, alpha, beta, M, N, K, tile_dim, segment_k_dim, num_stages, num_producer_warps, num_consumer_warps);
+        gemm_shmem_tc_async_kernel<DT, DT_ACC, 8><<<gridDim, blockDim, shmem_req>>>(A, B, C, D, alpha, beta,
+            M, N, K, tile_dim, segment_dim_k, num_stages, num_producer_warps, num_consumer_warps);
     }
     if (num_acc == 16) {
-        gemm_tensor_core_async_0_kernel<DT, DT_ACC, 16><<<gridDim, blockDim, shmem_req>>>(
-            A, B, C, D, alpha, beta, M, N, K, tile_dim, segment_k_dim, num_stages, num_producer_warps, num_consumer_warps);
+        gemm_shmem_tc_async_kernel<DT, DT_ACC, 16><<<gridDim, blockDim, shmem_req>>>(A, B, C, D, alpha, beta,
+            M, N, K, tile_dim, segment_dim_k, num_stages, num_producer_warps, num_consumer_warps);
     }
 }
 
@@ -568,8 +566,8 @@ void RunCorrectnessTestSquare(
     int K,
     int tile_dim_start,
     int tile_dim_end,
-    int segment_k_dim_start,
-    int segment_k_dim_end,
+    int segment_dim_k_start,
+    int segment_dim_k_end,
     int num_stages_start,
     int num_stages_end,
     int num_producer_warps_start,
@@ -596,37 +594,37 @@ void RunCorrectnessTestSquare(
         checkCuda(cudaMemcpy(A, mt.GetA(), mem_size_a, cudaMemcpyHostToDevice));
         checkCuda(cudaMemcpy(B, mt.GetB(), mem_size_b, cudaMemcpyHostToDevice));
         checkCuda(cudaMemcpy(C, mt.GetC(), mem_size_c, cudaMemcpyHostToDevice));
-        for (int segment_k_dim = segment_k_dim_start; segment_k_dim <= segment_k_dim_end; segment_k_dim *= 2) {
+        for (int segment_dim_k = segment_dim_k_start; segment_dim_k <= segment_dim_k_end; segment_dim_k *= 2) {
             for (int num_stages = num_stages_start; num_stages <= num_stages_end; ++num_stages) {
-                if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_k_dim, num_stages) <= prop->sharedMemPerMultiprocessor &&
-                    !(segment_k_dim % (tile_dim / 2)) &&
-                    !(K % segment_k_dim)) {
+                if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, num_stages) <= prop->sharedMemPerMultiprocessor &&
+                    !(segment_dim_k % (tile_dim / 2)) &&
+                    !(K % segment_dim_k)) {
                     for (int num_producer_warps = num_producer_warps_start; num_producer_warps <= num_producer_warps_end;
                         num_producer_warps *= 2) {
                         for (int num_consumer_warps = num_consumer_warps_start; num_consumer_warps <= num_consumer_warps_end;
                             num_consumer_warps *= 2) {
                             bool res = true;
-                            if (segment_k_dim <= tile_dim) {
+                            if (segment_dim_k <= tile_dim) {
                                 for (int i = 0; i < num_reps; ++i) {
                                     checkCuda(cudaMemset(D, 0, mem_size_d));
                                     matmul_test::MatDim dim = mt.GetMatDim();
-                                    gemm_tensor_core_0<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
-                                        segment_k_dim, num_stages, num_producer_warps, num_consumer_warps,
+                                    gemm_shmem_tc_async<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
+                                        segment_dim_k, num_stages, num_producer_warps, num_consumer_warps,
                                         prop->multiProcessorCount);
                                     checkCuda(cudaMemcpy(mt.GetRes(), D, mem_size_d, cudaMemcpyDeviceToHost));
                                     res = res && mt.IsCorrect(mt.GetRes(), dim, alpha, beta, atol);
                                 }
-                                printf("(%d, %d, %d, %d, %d): %s\n", tile_dim, segment_k_dim, num_stages, num_producer_warps,
+                                printf("(%d, %d, %d, %d, %d): %s\n", tile_dim, segment_dim_k, num_stages, num_producer_warps,
                                     num_consumer_warps, res ? "passed" : "failed");
                             } else {
                                 checkCuda(cudaMemset(D, 0, mem_size_d));
                                 matmul_test::MatDim dim = mt.GetMatDimMax();
-                                gemm_tensor_core_0<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
-                                    segment_k_dim, num_stages, num_producer_warps, num_consumer_warps,
+                                gemm_shmem_tc_async<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
+                                    segment_dim_k, num_stages, num_producer_warps, num_consumer_warps,
                                     prop->multiProcessorCount);
                                 checkCuda(cudaMemcpy(mt.GetRes(), D, mem_size_d, cudaMemcpyDeviceToHost));
                                 res = res && mt.IsCorrect(mt.GetRes(), dim, alpha, beta, atol);
-                                printf("(%d, %d, %d, %d, %d): %s\n", tile_dim, segment_k_dim, num_stages, num_producer_warps,
+                                printf("(%d, %d, %d, %d, %d): %s\n", tile_dim, segment_dim_k, num_stages, num_producer_warps,
                                     num_consumer_warps, res ? "passed" : "failed");
                             }
                         }
@@ -652,8 +650,8 @@ void RunAccuracyTestSquare(
     int K,
     int tile_dim_start,
     int tile_dim_end,
-    int segment_k_dim_start,
-    int segment_k_dim_end,
+    int segment_dim_k_start,
+    int segment_dim_k_end,
     int num_stages_start,
     int num_stages_end,
     int num_producer_warps_start,
@@ -682,37 +680,37 @@ void RunAccuracyTestSquare(
         checkCuda(cudaMemcpy(A, mt.GetA(), mem_size_a, cudaMemcpyHostToDevice));
         checkCuda(cudaMemcpy(B, mt.GetB(), mem_size_b, cudaMemcpyHostToDevice));
         checkCuda(cudaMemcpy(C, mt.GetC(), mem_size_c, cudaMemcpyHostToDevice));
-        for (int segment_k_dim = segment_k_dim_start; segment_k_dim <= segment_k_dim_end; segment_k_dim *= 2) {
+        for (int segment_dim_k = segment_dim_k_start; segment_dim_k <= segment_dim_k_end; segment_dim_k *= 2) {
             for (int num_stages = num_stages_start; num_stages <= num_stages_end; ++num_stages) {
-                if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_k_dim, num_stages) <= prop->sharedMemPerMultiprocessor &&
-                    !(segment_k_dim % (tile_dim / 2)) &&
-                    !(K % segment_k_dim)) {
+                if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, num_stages) <= prop->sharedMemPerMultiprocessor &&
+                    !(segment_dim_k % (tile_dim / 2)) &&
+                    !(K % segment_dim_k)) {
                     for (int num_producer_warps = num_producer_warps_start; num_producer_warps <= num_producer_warps_end;
                         num_producer_warps *= 2) {
                         for (int num_consumer_warps = num_consumer_warps_start; num_consumer_warps <= num_consumer_warps_end;
                             num_consumer_warps *= 2) {
                             int count = 0;
-                            if (segment_k_dim <= tile_dim) {
+                            if (segment_dim_k <= tile_dim) {
                                 for (int i = 0; i < num_reps; ++i) {
                                     checkCuda(cudaMemset(D, 0, mem_size_d));
                                     matmul_test::MatDim dim = mt.GetMatDim();
-                                    gemm_tensor_core_0<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
-                                        segment_k_dim, num_stages, num_producer_warps, num_consumer_warps,
+                                    gemm_shmem_tc_async<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
+                                        segment_dim_k, num_stages, num_producer_warps, num_consumer_warps,
                                         prop->multiProcessorCount);
                                     checkCuda(cudaMemcpy(mt.GetRes(), D, mem_size_d, cudaMemcpyDeviceToHost));
                                     count += mt.GetNumIncorrect(mt.GetRes(), dim, alpha, beta, atol);
                                 }
-                                printf("(%d, %d, %d, %d, %d): %.2f / %d\n", tile_dim, segment_k_dim, num_stages,
+                                printf("(%d, %d, %d, %d, %d): %.2f / %d\n", tile_dim, segment_dim_k, num_stages,
                                     num_producer_warps, num_consumer_warps,  static_cast<float>(count) / num_reps, M * N);
                             } else {
                                 checkCuda(cudaMemset(D, 0, mem_size_d));
                                 matmul_test::MatDim dim = mt.GetMatDimMax();
-                                gemm_tensor_core_0<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
-                                    segment_k_dim, num_stages, num_producer_warps, num_consumer_warps,
+                                gemm_shmem_tc_async<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
+                                    segment_dim_k, num_stages, num_producer_warps, num_consumer_warps,
                                     prop->multiProcessorCount);
                                 checkCuda(cudaMemcpy(mt.GetRes(), D, mem_size_d, cudaMemcpyDeviceToHost));
                                 count = mt.GetNumIncorrect(mt.GetRes(), dim, alpha, beta, atol);
-                                printf("(%d, %d, %d, %d, %d): %.2f / %d\n", tile_dim, segment_k_dim, num_stages,
+                                printf("(%d, %d, %d, %d, %d): %.2f / %d\n", tile_dim, segment_dim_k, num_stages,
                                     num_producer_warps, num_consumer_warps,  static_cast<float>(count), M * N);
                             }
                         }
@@ -738,8 +736,8 @@ void RunPerformanceTestSquare(
     int K,
     int tile_dim_start,
     int tile_dim_end,
-    int segment_k_dim_start,
-    int segment_k_dim_end,
+    int segment_dim_k_start,
+    int segment_dim_k_end,
     int num_stages_start,
     int num_stages_end,
     int num_producer_warps_start,
@@ -772,30 +770,30 @@ void RunPerformanceTestSquare(
         checkCuda(cudaMemcpy(A, mt.GetA(), mem_size_a, cudaMemcpyHostToDevice));
         checkCuda(cudaMemcpy(B, mt.GetB(), mem_size_b, cudaMemcpyHostToDevice));
         checkCuda(cudaMemcpy(C, mt.GetC(), mem_size_c, cudaMemcpyHostToDevice));
-        for (int segment_k_dim = segment_k_dim_start; segment_k_dim <= segment_k_dim_end; segment_k_dim *= 2) {
+        for (int segment_dim_k = segment_dim_k_start; segment_dim_k <= segment_dim_k_end; segment_dim_k *= 2) {
             for (int num_stages = num_stages_start; num_stages <= num_stages_end; ++num_stages) {
-                if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_k_dim, num_stages) <= prop->sharedMemPerMultiprocessor &&
-                    !(segment_k_dim % (tile_dim / 2)) &&
-                    !(K % segment_k_dim)) {
+                if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, num_stages) <= prop->sharedMemPerMultiprocessor &&
+                    !(segment_dim_k % (tile_dim / 2)) &&
+                    !(K % segment_dim_k)) {
                     for (int num_producer_warps = num_producer_warps_start; num_producer_warps <= num_producer_warps_end;
                         num_producer_warps *= 2) {
                         for (int num_consumer_warps = num_consumer_warps_start; num_consumer_warps <= num_consumer_warps_end;
                             num_consumer_warps *= 2) {
                             float ms = 0.0f;
                             matmul_test::MatDim dim = mt.GetMatDimMax();
-                            gemm_tensor_core_0<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
-                                segment_k_dim, num_stages, num_producer_warps, num_consumer_warps,
+                            gemm_shmem_tc_async<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
+                                segment_dim_k, num_stages, num_producer_warps, num_consumer_warps,
                                 prop->multiProcessorCount);
                             checkCuda(cudaEventRecord(start, 0));
                             for (int i = 0; i < num_reps; ++i) {
-                                gemm_tensor_core_0<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
-                                    segment_k_dim, num_stages, num_producer_warps, num_consumer_warps,
+                                gemm_shmem_tc_async<DT, DT_ACC>(A, B, C, D, alpha, beta, dim.m, dim.n, dim.k, tile_dim,
+                                    segment_dim_k, num_stages, num_producer_warps, num_consumer_warps,
                                     prop->multiProcessorCount);
                             }
                             checkCuda(cudaEventRecord(stop, 0));
                             checkCuda(cudaEventSynchronize(stop));
                             checkCuda(cudaEventElapsedTime(&ms, start, stop));
-                            printf("(%d, %d, %d, %d, %d): %.2f\n", tile_dim, segment_k_dim, num_stages, num_producer_warps,
+                            printf("(%d, %d, %d, %d, %d): %.2f\n", tile_dim, segment_dim_k, num_stages, num_producer_warps,
                                 num_consumer_warps,  2 * M * N * 1e-9 * K * num_reps / ms);
                         }
                     }
@@ -830,11 +828,11 @@ int main(void) {
     int N = 1024;
     int K = 1024;
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (1024, 1024, 1024), correctness:\n");
+    printf("\n\n%-30s", "gemm_shmem_tc_async_kernel, <half, half>, (1024, 1024, 1024), correctness:\n");
     RunCorrectnessTestSquare<half, half>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, 0.001f);
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (1024, 1024, 1024), correctness:\n");
+    printf("\n\n%-30s", "gemm_shmem_tc_async_kernel, <half, float>, (1024, 1024, 1024), correctness:\n");
     RunCorrectnessTestSquare<half, float>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, 0.001f);
 
@@ -844,11 +842,11 @@ int main(void) {
     N = 256;
     K = 256;
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (256, 256, 256), accuracy:\n");
+    printf("\n\n%-30s", "gemm_shmem_tc_async_kernel, <half, half>, (256, 256, 256), accuracy:\n");
     RunAccuracyTestSquare<half, half>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (256, 256, 256), accuracy:\n");
+    printf("\n\n%-30s", "gemm_shmem_tc_async_kernel, <half, float>, (256, 256, 256), accuracy:\n");
     RunAccuracyTestSquare<half, float>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
@@ -856,11 +854,11 @@ int main(void) {
     N = 512;
     K = 512;
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (512, 512, 512), accuracy:\n");
+    printf("\n\n%-30s", "gemm_shmem_tc_async_kernel, <half, half>, (512, 512, 512), accuracy:\n");
     RunAccuracyTestSquare<half, half>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (512, 512, 512), accuracy:\n");
+    printf("\n\n%-30s", "gemm_shmem_tc_async_kernel, <half, float>, (512, 512, 512), accuracy:\n");
     RunAccuracyTestSquare<half, float>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
@@ -870,11 +868,11 @@ int main(void) {
     N = 16384;
     K = 16384;
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, half>, (16384, 16384, 16384), [TFLOPS]:\n");
+    printf("\n\n%-30s", "gemm_shmem_tc_async_kernel, <half, half>, (16384, 16384, 16384), [TFLOPS]:\n");
     RunPerformanceTestSquare<half, half>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
-    printf("\n\n%-30s", "gemm_tensor_core_0_kernel, <half, float>, (16384, 16384, 16384), [TFLOPS]:\n");
+    printf("\n\n%-30s", "gemm_shmem_tc_async_kernel, <half, float>, (16384, 16384, 16384), [TFLOPS]:\n");
     RunPerformanceTestSquare<half, float>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 32, 256, 1, 10, 1, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
