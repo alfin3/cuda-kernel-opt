@@ -40,7 +40,6 @@ const int WMMA_M = 16;
 const int WMMA_N = 16;
 const int WMMA_K = 16;
 
-const int NUM_STAGES_MAX = 16;
 const int SHMEM_ALIGNMENT = 32;
 const int SKEW_HALF = 16;
 const int WARP_SIZE = 32;
@@ -250,14 +249,14 @@ void gemm_shmem_tc_async_opt_port_kernel(
     extern __shared__ __align__(SHMEM_ALIGNMENT) char shmem_[];
     CudaBarrier *bar_consumer = reinterpret_cast<CudaBarrier *>(&shmem_[0]);
     CudaBarrier *empty = reinterpret_cast<CudaBarrier *>(&shmem_[1 * sizeof(CudaBarrier)]);
-    CudaBarrier *full = reinterpret_cast<CudaBarrier *>(&shmem_[(1 + NUM_STAGES_MAX) * sizeof(CudaBarrier)]);
-    const int bar_alloc_size = (1 + 2 * NUM_STAGES_MAX) * sizeof(CudaBarrier);
+    CudaBarrier *full = reinterpret_cast<CudaBarrier *>(&shmem_[(1 + num_stages) * sizeof(CudaBarrier)]);
+    const int bar_alloc_size = (1 + 2 * num_stages) * sizeof(CudaBarrier);
     DT *shmem = reinterpret_cast<DT *>(&shmem_[bar_alloc_size + bar_alloc_size % SHMEM_ALIGNMENT]);
 
-    if (threadIdx.x < 2 * NUM_STAGES_MAX) {
+    if (threadIdx.x < 2 * num_stages) {
         init(&empty[threadIdx.x], (num_producer_warps + num_consumer_warps) * WARP_SIZE);
     }
-    if (threadIdx.x == 2 * NUM_STAGES_MAX) {
+    if (threadIdx.x == 2 * num_stages) {
         init(bar_consumer, (num_consumer_warps) * WARP_SIZE);
     }
 
@@ -421,8 +420,8 @@ void gemm_shmem_tc_async_opt_port_kernel<half, float, 16>(
     int N,
     int K,
     int tile_dim,
-    int tile_m_group,
     int segment_k_dim,
+    int tile_m_group,
     int num_stages,
     int num_producer_warps,
     int num_consumer_warps);
@@ -501,7 +500,7 @@ void gemm_shmem_tc_async_opt_port_kernel<half, half, 16>(
 
 template<typename DT, typename DT_ACC>
 int get_shmem_req(int tile_dim, int segment_k_dim, int num_stages) {
-    const int bar_alloc_size = (1 + 2 * NUM_STAGES_MAX) * sizeof(CudaBarrier);
+    const int bar_alloc_size = (1 + 2 * num_stages) * sizeof(CudaBarrier);
     const int bar_alloc_size_aligned = bar_alloc_size + bar_alloc_size % SHMEM_ALIGNMENT;
     const int size_ab =
         num_stages * (2 * tile_dim * (segment_k_dim + SKEW_HALF) * sizeof(DT)) + bar_alloc_size_aligned;
@@ -535,7 +534,7 @@ void gemm_shmem_tc_async_opt_port(
     assert(!(segment_dim_k % (tile_dim / 2)));
     assert(!(M % tile_dim || N % tile_dim));
     assert(!(K % segment_dim_k));
-    assert(num_stages > 0 || num_stages <= NUM_STAGES_MAX);
+    assert(num_stages > 0);
     assert(num_producer_warps == 1 || num_producer_warps == 2 || num_producer_warps == 4 ||num_producer_warps == 8);
     assert(num_consumer_warps == 4 || num_consumer_warps == 8);
 
