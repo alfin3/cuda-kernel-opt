@@ -401,24 +401,27 @@ void consume(
 #pragma unroll
             for (int i = 0; i < warp_tile_rows; ++i) {
                 const int shmem_row_a = (consumer_warp_id / 2) * warp_tile_rows * WMMA_M + i * WMMA_M;
+                full[(segment_count % num_stages) * num_consumer_warps * warp_tile_rows +
+                     consumer_warp_id * warp_tile_rows + i].arrive_and_wait();
 #pragma unroll
                 for (int j = 0; j < warp_tile_cols; ++j) {
                     const int shmem_row_b = (consumer_warp_id % 2) * warp_tile_cols * WMMA_N + j * WMMA_N;
                     const int bar_offset_b = num_stages * num_consumer_warps * warp_tile_rows;
-
-                    full[(segment_count % num_stages) * num_consumer_warps * warp_tile_rows +
-                         consumer_warp_id * warp_tile_rows + i].arrive_and_wait();
-                    full[bar_offset_b + (segment_count % num_stages) * num_consumer_warps * warp_tile_cols +
-                         consumer_warp_id * warp_tile_cols + j].arrive_and_wait();
+                    if (i == 0) {
+                        full[bar_offset_b + (segment_count % num_stages) * num_consumer_warps * warp_tile_cols +
+                             consumer_warp_id * warp_tile_cols + j].arrive_and_wait();
+                    }
 
                     consume_acc<DT, DT_ACC>(&warp_tile_c[i * warp_tile_cols + j], shmem_ptr, K, rows, cols,
                         shmem_row_a, shmem_row_b, shmem_stride, num_stages, (segment_count % num_stages));
 
-                    auto token_a = empty[(segment_count % num_stages) * num_consumer_warps * warp_tile_rows +
-                        consumer_warp_id * warp_tile_rows + i].arrive();
-                    auto token_b = empty[bar_offset_b + (segment_count % num_stages) * num_consumer_warps * warp_tile_cols +
-                        consumer_warp_id * warp_tile_cols + j].arrive();
+                    if (i == warp_tile_rows - 1) {
+                        auto token_b = empty[bar_offset_b + (segment_count % num_stages) * num_consumer_warps * warp_tile_cols +
+                            consumer_warp_id * warp_tile_cols + j].arrive();
+                    }
                 }
+                auto token_a = empty[(segment_count % num_stages) * num_consumer_warps * warp_tile_rows +
+                    consumer_warp_id * warp_tile_rows + i].arrive();
             }
         } else {
 
@@ -1007,7 +1010,7 @@ void RunCorrectnessTestSquare(
                             const int warp_tile_cols = get_num_acc(tile_dim, num_consumer_warps) / warp_tile_rows;
                             const int bar_step_rows_a[3] = {WMMA_M, warp_tile_rows * WMMA_M, tile_dim};
                             const int bar_step_rows_b[3] = {WMMA_N, warp_tile_cols * WMMA_N, tile_dim};
-                            for (int i = 1; i < 3; ++i) {
+                            for (int i = 0; i < 3; ++i) {
                                 if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_step_rows_a[i],
                                         bar_step_rows_b[i], num_stages, num_consumer_warps) <= shmem_size &&
                                     !(K % segment_dim_k)) {
@@ -1110,7 +1113,7 @@ void RunAccuracyTestSquare(
                             const int warp_tile_cols = get_num_acc(tile_dim, num_consumer_warps) / warp_tile_rows;
                             const int bar_step_rows_a[3] = {WMMA_M, warp_tile_rows * WMMA_M, tile_dim};
                             const int bar_step_rows_b[3] = {WMMA_N, warp_tile_cols * WMMA_N, tile_dim};
-                            for (int i = 1; i < 3; ++i) {
+                            for (int i = 0; i < 3; ++i) {
                                 if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_step_rows_a[i],
                                         bar_step_rows_b[i], num_stages, num_consumer_warps) <= shmem_size &&
                                     !(K % segment_dim_k)) {
@@ -1219,7 +1222,7 @@ void RunPerformanceTestSquare(
                             const int warp_tile_cols = get_num_acc(tile_dim, num_consumer_warps) / warp_tile_rows;
                             const int bar_step_rows_a[3] = {WMMA_M, warp_tile_rows * WMMA_M, tile_dim};
                             const int bar_step_rows_b[3] = {WMMA_N, warp_tile_cols * WMMA_N, tile_dim};
-                            for (int i = 1; i < 2; ++i) {
+                            for (int i = 0; i < 3; ++i) {
                                 if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_step_rows_a[i],
                                         bar_step_rows_b[i], num_stages, num_consumer_warps) <= shmem_size &&
                                     !(K % segment_dim_k)) {
@@ -1293,11 +1296,11 @@ int main(void) {
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (256, 256, 256), accuracy:\n");
     RunAccuracyTestSquare<half, half>(
-        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 6, 1, 4, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (256, 256, 256), accuracy:\n");
     RunAccuracyTestSquare<half, float>(
-        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 6, 1, 4, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     M = 512;
     N = 512;
@@ -1305,11 +1308,11 @@ int main(void) {
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (512, 512, 512), accuracy:\n");
     RunAccuracyTestSquare<half, half>(
-        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 6, 1, 4, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (512, 512, 512), accuracy:\n");
     RunAccuracyTestSquare<half, float>(
-        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 6, 1, 4, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     // Performance tests.
 
@@ -1319,11 +1322,11 @@ int main(void) {
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (16384, 16384, 16384), [TFLOPS]:\n");
     RunPerformanceTestSquare<half, half>(
-        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 6, 1, 4, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 1, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (16384, 16384, 16384), [TFLOPS]:\n");
     RunPerformanceTestSquare<half, float>(
-        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 6, 1, 4, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 1, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     return 0;
 }
