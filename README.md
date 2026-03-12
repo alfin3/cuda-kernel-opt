@@ -16,7 +16,7 @@ The evaluation of the `matmul_shmem` kernel (`matmul_shmem.cu`) showed that opti
 
 # matmul_shmem_tc_async_opt_port_1.cu
 
-The synchronization scheme, provided in the gemm_shmem_tc_async_opt_port kernel, was designed to i) decouple the consumer warps from each other, including at the level of accumulators, and ii) shift the start of the execution by each consumer warp according to the order of the load instructions for the A and transposed B segments of the K dimension. The order of the load instructions was from top to bottom. The earlier load instructions should result in an earlier start of matrix multiply and accumulate. The later load instructions should result in a later start of matrix multiply and accumulate. This shift should be preserved across the pipeline stages, and may potentially provide better utilization of Tensor Cores in settings where the number of stages is small and the size of tiles is large.
+The synchronization scheme, provided in the `gemm_shmem_tc_async_opt_port` kernel, was designed to i) decouple the consumer warps from each other, including at the level of accumulators, and ii) shift the start of the execution by each consumer warp according to the order of the load instructions for the A and transposed B segments of the K dimension. The order of the load instructions was from top to bottom. The earlier load instructions should result in an earlier start of matrix multiply and accumulate. The later load instructions should result in a later start of matrix multiply and accumulate. This shift should be preserved across the pipeline stages, and may potentially provide better utilization of Tensor Cores in settings where the number of stages is small and the size of tiles is large.
 
 <br>
 
@@ -25,3 +25,7 @@ The synchronization scheme, provided in the gemm_shmem_tc_async_opt_port kernel,
 </div>
 
 <br>
+
+# matmul_shmem_tc_async_opt_port_2.cu
+
+An optimization is designed with respect to the shift synchronization scheme at the level of accumulators that was implemented in `matmul_shmem_tc_async_opt_port_1.cu`. Instead of using separate barriers for every row and every column of a warp tile, separate barriers are used for the first few rows and the first few columns of a warp tile and the residual rows and columns of the warp tile are controlled with single barriers respectively.
