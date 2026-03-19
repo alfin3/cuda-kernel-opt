@@ -28,12 +28,12 @@ The synchronization scheme, provided in the `gemm_shmem_tc_async_opt_port` kerne
 
 # matmul_shmem_tc_async_opt_port_2.cu
 
-An optimization is designed with respect to the shift synchronization scheme at the level of accumulators that was implemented in `matmul_shmem_tc_async_opt_port_1.cu`. Instead of using separate barriers for every row and every column of a warp tile, separate barriers are used for the first few rows and the first few columns of a warp tile and the residual rows and columns of the warp tile are controlled with single barriers respectively.
+An optimization is designed with respect to the shift synchronization scheme implemented in `matmul_shmem_tc_async_opt_port_1.cu`. Instead of using separate barriers for every consumer warp or every row and column of a warp tile, separate barriers were used for the first few upper left consumer warps or the first few upper left rows and columns of a warp tile, and the residual consumer warps or rows and columns of a warp tile were controlled with single barriers. According to this optimization, an early start of matrix multiply and accumulate may be achieved with fewer barriers and a decreased synchronization overhead. Additionally, the ability to handle the rest of the warp tile with arrays of fragments was preserved.
 
 <br>
 
 <div align="center">
-    <img src="readme/shift_synchronization_opt.jpg" width="800"/>
+    <img src="readme/shift_synchronization_opt.jpg" width="700"/>
 </div>
 
 <br>
