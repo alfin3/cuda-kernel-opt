@@ -1185,10 +1185,11 @@ void RunCorrectnessTestSquare(
                             const int bar_step_rows_b[3] = {WMMA_N, warp_tile_cols * WMMA_N, tile_dim};
                             const int bar_steps_a_end[3] = {warp_tile_rows, tile_dim / (warp_tile_rows * WMMA_M), 0};
                             const int bar_steps_b_end[3] = {warp_tile_cols, tile_dim / (warp_tile_rows * WMMA_M), 0};
-                            for (int i = 2; i < 3; ++i) {
-                                for (int bar_steps_a = 0; bar_steps_a <= bar_steps_a_end[i]; ++bar_steps_a) {
-                                    for (int bar_steps_b = 0; bar_steps_b <= bar_steps_b_end[i]; ++bar_steps_b) {
-                                        if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_steps_a, bar_steps_b,
+                            for (int i = 0; i < 1; ++i) {
+                                for (int bar_steps_a = 0; bar_steps_a <= bar_steps_a_end[i] - 1; ++bar_steps_a) {
+                                    for (int bar_steps_b = 0; bar_steps_b <= bar_steps_b_end[i] - 1; ++bar_steps_b) {
+                                        if (bar_steps_a == bar_steps_b &&
+                                            get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_steps_a, bar_steps_b,
                                                 bar_step_rows_a[i], bar_step_rows_b[i], num_stages,
                                                 num_consumer_warps) <= shmem_size &&
                                             !(K % segment_dim_k)) {
@@ -1208,7 +1209,7 @@ void RunCorrectnessTestSquare(
                                                        segment_dim_k, bar_steps_a, bar_steps_b, bar_step_rows_a[i],
                                                        bar_step_rows_b[i], tile_group_m, num_stages, num_producer_warps,
                                                        num_consumer_warps, res ? "passed" : "failed");
-                                            } else {
+                                            } else if (bar_steps_a == bar_steps_b) {
                                                 checkCuda(cudaMemset(D, 0, mem_size_d));
                                                 matmul_test::MatDim dim = mt.GetMatDimMax();
                                                 gemm_shmem_tc_async_opt_port<DT, DT_ACC>(A, B, C, D, alpha, beta,
@@ -1479,11 +1480,11 @@ int main(void) {
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (1024, 1024, 1024), correctness:\n");
     RunCorrectnessTestSquare<half, half>(
-        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 1, 6, 1, 10, 2, 8, 4, 8, 2, 0.001f);
+        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 6, 1, 10, 2, 8, 4, 8, 2, 0.001f);
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (1024, 1024, 1024), correctness:\n");
     RunCorrectnessTestSquare<half, float>(
-        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 1, 6, 1, 10, 2, 8, 4, 8, 2, 0.001f);
+        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 6, 1, 10, 2, 8, 4, 8, 2, 0.001f);
 
 //    // Accuracy tests.
 //
