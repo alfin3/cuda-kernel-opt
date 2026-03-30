@@ -203,7 +203,7 @@ void produce(
 
                 if (bar_step_rows_a == rows) {
                     empty[(segment_count % num_stages)].arrive_and_wait();
-                } else if (bar_step_rows_a == warp_tile_rows * WMMA_M) {
+                } else if (bar_step_rows_a == warp_tile_rows * WMMA_M && bar_step_rows_b == warp_tile_cols * WMMA_N) {
 
                     // Barriers are in row-major order; barrier ids may not be equal to consumer warp ids.
                     if (i < bar_steps_a) {
@@ -238,7 +238,7 @@ void produce(
 
                 if (bar_step_rows_a == rows) {
                     auto token = full[(segment_count % num_stages)].arrive();
-                } else if (bar_step_rows_a == warp_tile_rows * WMMA_M) {
+                } else if (bar_step_rows_a == warp_tile_rows * WMMA_M && bar_step_rows_b == warp_tile_cols * WMMA_N) {
                     if (i < bar_steps_a) {
                         for (int j = 0; j < bar_steps_b; ++j) {
                             auto token = full[(segment_count % num_stages) * (bar_steps_a * bar_steps_b + 1) +
@@ -346,7 +346,7 @@ void produce(
             for (int i = 0; i < num_stages; ++i) {
                 auto token = empty[i].arrive();
             }
-        } else if (bar_step_rows_a == warp_tile_rows * WMMA_M) {
+        } else if (bar_step_rows_a == warp_tile_rows * WMMA_M && bar_step_rows_b == warp_tile_cols * WMMA_N) {
             for (int i = 0; i < num_stages * (bar_steps_a * bar_steps_b + 1); ++i) {
                 auto token = empty[i].arrive();
             }
@@ -368,7 +368,7 @@ void produce(
             }
         } else if (bar_step_rows_b == WMMA_N) {
             const int bar_offset_b = num_stages * num_consumer_warps * (bar_steps_a + 1);
-            for (int i = 0; i < num_stages * num_consumer_warps * (bar_steps_a + 1); ++i) {
+            for (int i = 0; i < num_stages * num_consumer_warps * (bar_steps_b + 1); ++i) {
                 auto token = empty[bar_offset_b + i].arrive();
             }
         }
@@ -458,68 +458,61 @@ void consume(
         const int shmem_stage_offset_b = shmem_stage_offset_a + num_stages * rows * shmem_stride;
 
         if (bar_step_rows_a == WMMA_M && bar_step_rows_b == WMMA_N){
+            const int bar_offset_b = num_stages * num_consumer_warps * (bar_steps_a + 1);
 
             // TODO: Move warp_tile_cols to the outer loop, because warp_tile_rows <= warp_tile_cols.
+            // Compute all rows against first the first few columns of accumulators, prioritizing the
+            // upper left region of rows and columns of accumulators.
 #pragma unroll
-            for (int i = 0; i < bar_steps_a; ++i) {
+            for (int i = 0; i < warp_tile_rows; ++i) {
                 const int shmem_row_a = (consumer_warp_id / 2) * warp_tile_rows * WMMA_M + i * WMMA_M;
-                full[(segment_count % num_stages) * num_consumer_warps * (bar_steps_a + 1) +
-                     consumer_warp_id * (bar_steps_a + 1) + i].arrive_and_wait();
+                if (i <= bar_steps_a) {
+                    full[(segment_count % num_stages) * num_consumer_warps * (bar_steps_a + 1) +
+                        consumer_warp_id * (bar_steps_a + 1) + i].arrive_and_wait();
+                }
 #pragma unroll
                 for (int j = 0; j < bar_steps_b; ++j) {
                     const int shmem_row_b = (consumer_warp_id % 2) * warp_tile_cols * WMMA_N + j * WMMA_N;
-                    const int bar_offset_b = num_stages * num_consumer_warps * (bar_steps_a + 1);
                     if (i == 0) {
                         full[bar_offset_b + (segment_count % num_stages) * num_consumer_warps * (bar_steps_b + 1) +
-                             consumer_warp_id * (bar_steps_b + 1) + j].arrive_and_wait();
+                            consumer_warp_id * (bar_steps_b + 1) + j].arrive_and_wait();
                     }
-
                     consume_acc<DT, DT_ACC>(&warp_tile_c[i * warp_tile_cols + j], shmem_ptr, K, rows, cols,
                         shmem_row_a, shmem_row_b, shmem_stride, num_stages, (segment_count % num_stages));
 
-                    if (i == bar_steps_a - 1) { // If bar_steps_a == 0, this is not reached.
+                    if (i == warp_tile_rows - 1) { // Not reached if bar_steps_b == 0.
                         auto token_b = empty[bar_offset_b + (segment_count % num_stages) * num_consumer_warps * (bar_steps_b + 1) +
                             consumer_warp_id * (bar_steps_b + 1) + j].arrive();
                     }
                 }
-                auto token_a = empty[(segment_count % num_stages) * num_consumer_warps * (bar_steps_a + 1) +
-                    consumer_warp_id * (bar_steps_a + 1) + i].arrive();
             }
 
-            // Compute the residual accumulators of the warp tile. TODO: use arrays instead of consume_acc.
-            const int bar_offset_b = num_stages * num_consumer_warps * (bar_steps_a + 1);
-            full[(segment_count % num_stages) * num_consumer_warps * (bar_steps_a + 1) +
-                 consumer_warp_id * (bar_steps_a + 1) + bar_steps_a].arrive_and_wait();
-            full[bar_offset_b + (segment_count % num_stages) * num_consumer_warps * (bar_steps_b + 1) +
-                 consumer_warp_id * (bar_steps_b + 1) + bar_steps_b].arrive_and_wait();
-
+            // Compute all rows against the residual columns of accumulators.
 #pragma unroll
             for (int i = 0; i < warp_tile_rows; ++i) {
                 const int shmem_row_a = (consumer_warp_id / 2) * warp_tile_rows * WMMA_M + i * WMMA_M;
+                if (i == 0) { // If bar_steps_b == 0, this is the residual barrier for B.
+                    full[bar_offset_b + (segment_count % num_stages) * num_consumer_warps * (bar_steps_b + 1) +
+                        consumer_warp_id * (bar_steps_b + 1) + bar_steps_b].arrive_and_wait();
+                }
 #pragma unroll
                 for (int j = bar_steps_b; j < warp_tile_cols; ++j) {
                     const int shmem_row_b = (consumer_warp_id % 2) * warp_tile_cols * WMMA_N + j * WMMA_N;
                     consume_acc<DT, DT_ACC>(&warp_tile_c[i * warp_tile_cols + j], shmem_ptr, K, rows, cols,
                         shmem_row_a, shmem_row_b, shmem_stride, num_stages, (segment_count % num_stages));
                 }
-            }
-            
-#pragma unroll
-            for (int i = bar_steps_a; i < warp_tile_rows; ++i) {
-                const int shmem_row_a = (consumer_warp_id / 2) * warp_tile_rows * WMMA_M + i * WMMA_M;
-#pragma unroll
-                for (int j = 0; j < bar_steps_b; ++j) {
-                    const int shmem_row_b = (consumer_warp_id % 2) * warp_tile_cols * WMMA_N + j * WMMA_N;
-                    consume_acc<DT, DT_ACC>(&warp_tile_c[i * warp_tile_cols + j], shmem_ptr, K, rows, cols,
-                        shmem_row_a, shmem_row_b, shmem_stride, num_stages, (segment_count % num_stages));
+
+                if (i < bar_steps_a) {
+                    auto token_a = empty[(segment_count % num_stages) * num_consumer_warps * (bar_steps_a + 1) +
+                        consumer_warp_id * (bar_steps_a + 1) + i].arrive();
+                }
+                if (i == warp_tile_rows - 1) {
+                    auto token_a = empty[(segment_count % num_stages) * num_consumer_warps * (bar_steps_a + 1) +
+                        consumer_warp_id * (bar_steps_a + 1) + bar_steps_a].arrive();
+                    auto token_b = empty[bar_offset_b + (segment_count % num_stages) * num_consumer_warps * (bar_steps_b + 1) +
+                        consumer_warp_id * (bar_steps_b + 1) + bar_steps_b].arrive();
                 }
             }
-
-            auto token_a = empty[(segment_count % num_stages) * num_consumer_warps * (bar_steps_a + 1) +
-                 consumer_warp_id * (bar_steps_a + 1) + bar_steps_a].arrive();
-            auto token_b = empty[bar_offset_b + (segment_count % num_stages) * num_consumer_warps * (bar_steps_b + 1) +
-                 consumer_warp_id * (bar_steps_b + 1) + bar_steps_b].arrive();
-
         } else {
 
             if (bar_step_rows_a == rows && bar_step_rows_b == rows) {
@@ -602,8 +595,8 @@ int get_tile_offset_cd(int M, int N, int tile_dim, int tile_group_m, int tile_co
 // M, N, K: multiples of tile_dim,
 // tile_dim: 64 or 128,
 // segment_dim_k: multiple of 64,
-// bar_steps_a: [0, tile_dim / bar_step_rows_a], no effect if bar_step_rows_a == tile_dim,
-// bar_steps_b: [0, tile_dim / bar_step_rows_b], no effect if bar_step_rows_b == tile_dim,
+// bar_steps_a: [0, tile_dim / bar_step_rows_a), no effect if bar_step_rows_a == tile_dim,
+// bar_steps_b: [0, tile_dim / bar_step_rows_b), no effect if bar_step_rows_b == tile_dim,
 // bar_step_rows_a: WMMA_M, get_warp_tile_rows(...) * WMMA_M, or tile_dim,
 // bar_step_rows_b: WMMA_N, NUM_ACC / get_warp_tile_rows(...) * WMMA_N, or tile_dim,
 // tile_group_m: > 0,
@@ -668,17 +661,13 @@ void gemm_shmem_tc_async_opt_port_kernel(
         num_bars_empty_a = num_stages;
         num_bars_empty_b = num_stages;
     } else if (bar_step_rows_a == warp_tile_rows * WMMA_M && bar_step_rows_b == warp_tile_cols * WMMA_N) {
-
-        // TODO: optimize.
-        // If bar_steps_a and bar_steps_b are set to their maximal allowed values, then there are two
-        // unused empty barriers and two unused full barriers per stage.
         num_bars_empty_a = num_stages * (bar_steps_a * bar_steps_b + 1);
         num_bars_empty_b = num_stages * (bar_steps_a * bar_steps_b + 1);
     } else if (bar_step_rows_a == WMMA_M && bar_step_rows_b == WMMA_N) {
 
-        // TODO: optimize.
-        // If bar_steps_a and bar_steps_b are set to their maximal allowed values, then there are two
-        // unused empty barriers and two unused full barriers per stage for every consumer warp.
+        // If bar_steps_a is set to its maximal allowed value, then there is a separate barrier for
+        // every row of accumulators in a warp tile, and the residual barrier is the barrier for the
+        // last row of accumulators; similarly for bar_steps_b and the columns of accumulators.
         num_bars_empty_a = num_stages * num_consumer_warps * (bar_steps_a + 1);
         num_bars_empty_b = num_stages * num_consumer_warps  * (bar_steps_b + 1);
     }
@@ -703,7 +692,7 @@ void gemm_shmem_tc_async_opt_port_kernel(
                 init(&empty[i * num_bars_stage_a + idx], bar_thread_count_a);
                 init(&full[i * num_bars_stage_a + idx], bar_thread_count_a);
             }
-        } else if (bar_step_rows_a == warp_tile_rows * WMMA_M) {
+        } else if (bar_step_rows_a == warp_tile_rows * WMMA_M && bar_step_rows_b == warp_tile_cols * WMMA_N) {
             const int bar_thread_count_a = (num_producer_warps / 2 + 1) * WARP_SIZE;
             const int bar_thread_count_a_residual = (num_producer_warps / 2 + (num_consumer_warps - bar_steps_a * bar_steps_b)) * WARP_SIZE;
             for (int i = 0; i < num_stages; ++i) {
@@ -1077,9 +1066,9 @@ void gemm_shmem_tc_async_opt_port(
     assert(!(K % segment_dim_k));
     assert((bar_step_rows_a == tile_dim && bar_step_rows_b == tile_dim) ||
         (bar_step_rows_a == warp_tile_rows * WMMA_M && bar_step_rows_b == warp_tile_cols * WMMA_N &&
-         bar_steps_a <= tile_dim / (warp_tile_rows * WMMA_M) && bar_steps_b <= tile_dim / (warp_tile_cols * WMMA_N)) ||
+         bar_steps_a < tile_dim / (warp_tile_rows * WMMA_M) && bar_steps_b < tile_dim / (warp_tile_cols * WMMA_N)) ||
         (bar_step_rows_a == WMMA_M && bar_step_rows_b == WMMA_N &&
-         bar_steps_a <= warp_tile_rows && bar_steps_b <= warp_tile_cols));
+         bar_steps_a < warp_tile_rows && bar_steps_b < warp_tile_cols));
     assert(num_stages > 0);
     assert(num_producer_warps == 2 || num_producer_warps == 4 ||num_producer_warps == 8);
     assert(num_consumer_warps == 4 || num_consumer_warps == 8);
@@ -1183,15 +1172,14 @@ void RunCorrectnessTestSquare(
                             const int warp_tile_cols = get_num_acc(tile_dim, num_consumer_warps) / warp_tile_rows;
                             const int bar_step_rows_a[3] = {WMMA_M, warp_tile_rows * WMMA_M, tile_dim};
                             const int bar_step_rows_b[3] = {WMMA_N, warp_tile_cols * WMMA_N, tile_dim};
-                            const int bar_steps_a_end[3] = {warp_tile_rows, tile_dim / (warp_tile_rows * WMMA_M), 0};
-                            const int bar_steps_b_end[3] = {warp_tile_cols, tile_dim / (warp_tile_rows * WMMA_M), 0};
-                            for (int i = 0; i < 1; ++i) {
-                                for (int bar_steps_a = 0; bar_steps_a <= bar_steps_a_end[i] - 1; ++bar_steps_a) {
-                                    for (int bar_steps_b = 0; bar_steps_b <= bar_steps_b_end[i] - 1; ++bar_steps_b) {
-                                        if (bar_steps_a == bar_steps_b &&
-                                            get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_steps_a, bar_steps_b,
+                            const int bar_steps_a_end[3] = {warp_tile_rows, tile_dim / (warp_tile_rows * WMMA_M), 1};
+                            const int bar_steps_b_end[3] = {warp_tile_cols, tile_dim / (warp_tile_rows * WMMA_M), 1};
+                            for (int i = 0; i < 3; i += 2) {
+                                for (int bar_steps_a = 0; bar_steps_a < bar_steps_a_end[i]; ++bar_steps_a) {
+                                    for (int bar_steps_b = 0; bar_steps_b < bar_steps_b_end[i]; ++bar_steps_b) {
+                                        if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_steps_a, bar_steps_b,
                                                 bar_step_rows_a[i], bar_step_rows_b[i], num_stages,
-                                                num_consumer_warps) <= shmem_size &&
+                                                num_consumer_warps) + SHMEM_ALIGNMENT + 1024 <= shmem_size &&
                                             !(K % segment_dim_k)) {
                                             bool res = true;
                                             if (segment_dim_k <= tile_dim) {
@@ -1209,7 +1197,7 @@ void RunCorrectnessTestSquare(
                                                        segment_dim_k, bar_steps_a, bar_steps_b, bar_step_rows_a[i],
                                                        bar_step_rows_b[i], tile_group_m, num_stages, num_producer_warps,
                                                        num_consumer_warps, res ? "passed" : "failed");
-                                            } else if (bar_steps_a == bar_steps_b) {
+                                            } else {
                                                 checkCuda(cudaMemset(D, 0, mem_size_d));
                                                 matmul_test::MatDim dim = mt.GetMatDimMax();
                                                 gemm_shmem_tc_async_opt_port<DT, DT_ACC>(A, B, C, D, alpha, beta,
@@ -1298,12 +1286,12 @@ void RunAccuracyTestSquare(
                             const int bar_step_rows_b[3] = {WMMA_N, warp_tile_cols * WMMA_N, tile_dim};
                             const int bar_steps_a_end[3] = {warp_tile_rows, tile_dim / (warp_tile_rows * WMMA_M), 0};
                             const int bar_steps_b_end[3] = {warp_tile_cols, tile_dim / (warp_tile_rows * WMMA_M), 0};
-                            for (int i = 0; i < 3; ++i) {
-                                for (int bar_steps_a = 0; bar_steps_a <= bar_steps_a_end[i]; ++bar_steps_a) {
-                                    for (int bar_steps_b = 0; bar_steps_b <= bar_steps_b_end[i]; ++bar_steps_b) {
+                            for (int i = 0; i < 3; i += 2) {
+                                for (int bar_steps_a = 0; bar_steps_a < bar_steps_a_end[i]; ++bar_steps_a) {
+                                    for (int bar_steps_b = 0; bar_steps_b < bar_steps_b_end[i]; ++bar_steps_b) {
                                         if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_steps_a, bar_steps_b,
                                                 bar_step_rows_a[i], bar_step_rows_b[i], num_stages,
-                                                num_consumer_warps) <= shmem_size &&
+                                                num_consumer_warps) + SHMEM_ALIGNMENT + 1024 <= shmem_size &&
                                             !(K % segment_dim_k)) {
                                             int count = 0;
                                             if (segment_dim_k <= tile_dim) {
@@ -1414,12 +1402,12 @@ void RunPerformanceTestSquare(
                             const int bar_step_rows_b[3] = {WMMA_N, warp_tile_cols * WMMA_N, tile_dim};
                             const int bar_steps_a_end[3] = {warp_tile_rows, tile_dim / (warp_tile_rows * WMMA_M), 0};
                             const int bar_steps_b_end[3] = {warp_tile_cols, tile_dim / (warp_tile_rows * WMMA_M), 0};
-                            for (int i = 0; i < 3; ++i) {
-                                for (int bar_steps_a = 0; bar_steps_a <= bar_steps_a_end[i]; ++bar_steps_a) {
-                                    for (int bar_steps_b = 0; bar_steps_b <= bar_steps_b_end[i]; ++bar_steps_b) {
+                            for (int i = 0; i < 3; i += 2) {
+                                for (int bar_steps_a = 0; bar_steps_a < bar_steps_a_end[i]; ++bar_steps_a) {
+                                    for (int bar_steps_b = 0; bar_steps_b < bar_steps_b_end[i]; ++bar_steps_b) {
                                         if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_steps_a, bar_steps_b,
                                                 bar_step_rows_a[i], bar_step_rows_b[i], num_stages,
-                                                num_consumer_warps) <= shmem_size &&
+                                                num_consumer_warps) + SHMEM_ALIGNMENT + 1024 <= shmem_size &&
                                             !(K % segment_dim_k)) {
                                             float ms = 0.0f;
                                             matmul_test::MatDim dim = mt.GetMatDimMax();
@@ -1480,26 +1468,26 @@ int main(void) {
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (1024, 1024, 1024), correctness:\n");
     RunCorrectnessTestSquare<half, half>(
-        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 6, 1, 10, 2, 8, 4, 8, 2, 0.001f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 1, 6, 1, 10, 2, 8, 8, 8, 2, 0.001f);
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (1024, 1024, 1024), correctness:\n");
     RunCorrectnessTestSquare<half, float>(
-        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 6, 1, 10, 2, 8, 4, 8, 2, 0.001f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 1, 6, 1, 10, 2, 8, 8, 8, 2, 0.001f);
 
-//    // Accuracy tests.
-//
-//    M = 256;
-//    N = 256;
-//    K = 256;
-//
-//    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (256, 256, 256), accuracy:\n");
-//    RunAccuracyTestSquare<half, half>(
-//        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
-//
-//    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (256, 256, 256), accuracy:\n");
-//    RunAccuracyTestSquare<half, float>(
-//        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
-//
+    // Accuracy tests.
+
+    M = 256;
+    N = 256;
+    K = 256;
+
+    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (256, 256, 256), accuracy:\n");
+    RunAccuracyTestSquare<half, half>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+
+    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (256, 256, 256), accuracy:\n");
+    RunAccuracyTestSquare<half, float>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+
 //    M = 512;
 //    N = 512;
 //    K = 512;
