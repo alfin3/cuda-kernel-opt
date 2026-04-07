@@ -207,6 +207,12 @@ void produce(
                     if (i == 0 && (bar_steps_a == 0 || bar_steps_b < 2)) {
                         empty[(segment_count % num_stages) * (bar_steps_a * bar_steps_b + 1) +
                             bar_steps_a * bar_steps_b].arrive_and_wait();
+                        if (bar_steps_a > 0) {
+                            for (int j = 0; j < bar_steps_b; ++j) {
+                                empty[(segment_count % num_stages) * (bar_steps_a * bar_steps_b + 1) +
+                                    i * bar_steps_b + j].arrive_and_wait();
+                            }
+                        }
                     } else if (i < bar_steps_a) {
                         for (int j = 0; j < bar_steps_b; ++j) {
                             empty[(segment_count % num_stages) * (bar_steps_a * bar_steps_b + 1) +
@@ -274,6 +280,12 @@ void produce(
                     if (i == 0 && (bar_steps_b == 0 || bar_steps_a < num_consumer_warps / 2)) {
                         empty[bar_offset_b + (segment_count % num_stages) * (bar_steps_a * bar_steps_b + 1) +
                             bar_steps_a * bar_steps_b].arrive_and_wait();
+                        if (bar_steps_b > 0) {
+                            for (int j = 0; j < bar_steps_a; ++j) {
+                                empty[bar_offset_b + (segment_count % num_stages) * (bar_steps_a * bar_steps_b + 1) +
+                                    i + j * bar_steps_b].arrive_and_wait();
+                            }
+                        }
                     } else if (i < bar_steps_b) {
                         for (int j = 0; j < bar_steps_a; ++j) {
                             empty[bar_offset_b + (segment_count % num_stages) * (bar_steps_a * bar_steps_b + 1) +
@@ -1203,9 +1215,9 @@ void RunCorrectnessTestSquare(
                             const int bar_step_rows_b[3] = {WMMA_N, warp_tile_cols * WMMA_N, tile_dim};
                             const int bar_steps_a_end[3] = {warp_tile_rows - 1, tile_dim / (warp_tile_rows * WMMA_M), 0};
                             const int bar_steps_b_end[3] = {warp_tile_cols - 1, tile_dim / (warp_tile_cols * WMMA_N), 0};
-                            for (int i = 1; i < 2; ++i) {
+                            for (int i = 0; i < 3; ++i) {
                                 for (int bar_steps_a = 0; bar_steps_a <= bar_steps_a_end[i]; ++bar_steps_a) {
-                                    for (int bar_steps_b = 2; bar_steps_b <= 2; ++bar_steps_b) {
+                                    for (int bar_steps_b = 0; bar_steps_b <= bar_steps_b_end[i]; ++bar_steps_b) {
                                         if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_steps_a, bar_steps_b,
                                                 bar_step_rows_a[i], bar_step_rows_b[i], num_stages,
                                                 num_consumer_warps) + SHMEM_ALIGNMENT + 1024 <= shmem_size &&
@@ -1315,9 +1327,9 @@ void RunAccuracyTestSquare(
                             const int bar_step_rows_b[3] = {WMMA_N, warp_tile_cols * WMMA_N, tile_dim};
                             const int bar_steps_a_end[3] = {warp_tile_rows - 1, tile_dim / (warp_tile_rows * WMMA_M), 0};
                             const int bar_steps_b_end[3] = {warp_tile_cols - 1, tile_dim / (warp_tile_cols * WMMA_N), 0};
-                            for (int i = 1; i < 2; ++i) {
+                            for (int i = 0; i < 3; ++i) {
                                 for (int bar_steps_a = 0; bar_steps_a <= bar_steps_a_end[i]; ++bar_steps_a) {
-                                    for (int bar_steps_b = 2; bar_steps_b <= 2; ++bar_steps_b) {
+                                    for (int bar_steps_b = 0; bar_steps_b <= bar_steps_b_end[i]; ++bar_steps_b) {
                                         if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_steps_a, bar_steps_b,
                                                 bar_step_rows_a[i], bar_step_rows_b[i], num_stages,
                                                 num_consumer_warps) + SHMEM_ALIGNMENT + 1024 <= shmem_size &&
@@ -1431,7 +1443,7 @@ void RunPerformanceTestSquare(
                             const int bar_step_rows_b[3] = {WMMA_N, warp_tile_cols * WMMA_N, tile_dim};
                             const int bar_steps_a_end[3] = {warp_tile_rows - 1, tile_dim / (warp_tile_rows * WMMA_M), 0};
                             const int bar_steps_b_end[3] = {warp_tile_cols - 1, tile_dim / (warp_tile_cols * WMMA_N), 0};
-                            for (int i = 1; i < 2; ++i) {
+                            for (int i = 0; i < 3; ++i) {
                                 for (int bar_steps_a = 0; bar_steps_a <= bar_steps_a_end[i]; ++bar_steps_a) {
                                     for (int bar_steps_b = 0; bar_steps_b <= bar_steps_b_end[i]; ++bar_steps_b) {
                                         if (get_shmem_req<DT, DT_ACC>(tile_dim, segment_dim_k, bar_steps_a, bar_steps_b,
@@ -1497,11 +1509,11 @@ int main(void) {
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (1024, 1024, 1024), correctness:\n");
     RunCorrectnessTestSquare<half, half>(
-        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 6, 1, 10, 2, 8, 4, 8, 2, 0.001f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 1, 6, 1, 10, 2, 8, 4, 8, 2, 0.001f);
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (1024, 1024, 1024), correctness:\n");
     RunCorrectnessTestSquare<half, float>(
-        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 6, 1, 10, 2, 8, 4, 8, 2, 0.001f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 1, 6, 1, 10, 2, 8, 4, 8, 2, 0.001f);
 
     // Accuracy tests.
 
@@ -1511,11 +1523,11 @@ int main(void) {
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (256, 256, 256), accuracy:\n");
     RunAccuracyTestSquare<half, half>(
-        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (256, 256, 256), accuracy:\n");
     RunAccuracyTestSquare<half, float>(
-        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
 //    M = 512;
 //    N = 512;
