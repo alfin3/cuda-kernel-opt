@@ -32,6 +32,14 @@
 // The A and B matrices are of half type, and the C and D matrices can be of float or half types.
 //
 // Tested: A100, L4.
+// In the used testing environment, a subset of the configurations with 8 producer and 8 consumer
+// warps, resulted in failed correctness and accuracy tests. Multiplying the number of the
+// “used registers”, as reported by ptxas info, with the number of threads in the single thread
+// block on an SM for some configurations with 8 producer warps, including the above configurations,
+// resulted in the total number of registers that exceeded regsPerBlock. However, the
+// cudaErrorLaunchOutOfResources error, as reported by memcheck, only occurred for the above
+// configurations with 8 producer and 8 consumer warps. This error may be later addressed with the
+// __launch_bounds__() qualifier by separating different launch settings.
 
 #include <assert.h>
 #include <stdio.h>
@@ -192,7 +200,7 @@ void produce(
 
                 if (bar_step_rows_a == rows) {
                     empty[(segment_count % num_stages)].arrive_and_wait();
-                } else if (bar_step_rows_a == warp_tile_rows * WMMA_M) {
+                } else if (bar_step_rows_a == warp_tile_rows * WMMA_M && bar_step_rows_b == warp_tile_cols * WMMA_N) {
                     for (int j = 0; j < 2; ++j) { // rows / (warp_tile_cols * WMMA_N) == 2.
                         const int consumer_warp_id = i * 2 + j;
                         empty[(segment_count % num_stages) * num_consumer_warps +
@@ -215,7 +223,7 @@ void produce(
 
                 if (bar_step_rows_a == rows) {
                     auto token = full[(segment_count % num_stages)].arrive();
-                } else if (bar_step_rows_a == warp_tile_rows * WMMA_M) {
+                } else if (bar_step_rows_a == warp_tile_rows * WMMA_M && bar_step_rows_b == warp_tile_cols * WMMA_N) {
                     for (int j = 0; j < 2; ++j) {
                         const int consumer_warp_id = i * 2 + j;
                         auto token = full[(segment_count % num_stages) * num_consumer_warps +
@@ -290,7 +298,7 @@ void produce(
             for (int i = 0; i < num_stages; ++i) {
                 auto token = empty[i].arrive();
             }
-        } else if (bar_step_rows_a == warp_tile_rows * WMMA_M) {
+        } else if (bar_step_rows_a == warp_tile_rows * WMMA_M && bar_step_rows_b == warp_tile_cols * WMMA_N) {
             for (int i = 0; i < num_stages * num_consumer_warps; ++i) {
                 auto token = empty[i].arrive();
             }

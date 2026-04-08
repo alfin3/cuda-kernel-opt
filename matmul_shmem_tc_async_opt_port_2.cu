@@ -41,6 +41,14 @@
 // The A and B matrices are of half type, and the C and D matrices can be of float or half types.
 //
 // Tested: A100, L4.
+// In the used testing environment, a subset of the configurations with 8 producer and 8 consumer
+// warps, resulted in failed correctness and accuracy tests. Multiplying the number of the
+// “used registers”, as reported by ptxas info, with the number of threads in the single thread
+// block on an SM for some configurations with 8 producer warps, including the above configurations,
+// resulted in the total number of registers that exceeded regsPerBlock. However, the
+// cudaErrorLaunchOutOfResources error, as reported by memcheck, only occurred for the above
+// configurations with 8 producer and 8 consumer warps. This error may be later addressed with the
+// __launch_bounds__() qualifier by separating different launch settings.
 
 #include <assert.h>
 #include <stdio.h>
