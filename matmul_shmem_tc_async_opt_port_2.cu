@@ -1529,31 +1529,31 @@ int main(void) {
     RunAccuracyTestSquare<half, float>(
         &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
-//    M = 512;
-//    N = 512;
-//    K = 512;
-//
-//    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (512, 512, 512), accuracy:\n");
-//    RunAccuracyTestSquare<half, half>(
-//        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
-//
-//    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (512, 512, 512), accuracy:\n");
-//    RunAccuracyTestSquare<half, float>(
-//        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
-//
-//    // Performance tests.
-//
-//    M = 16384;
-//    N = 16384;
-//    K = 16384;
-//
-//    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (16384, 16384, 16384), [TFLOPS]:\n");
-//    RunPerformanceTestSquare<half, half>(
-//        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
-//
-//    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (16384, 16384, 16384), [TFLOPS]:\n");
-//    RunPerformanceTestSquare<half, float>(
-//        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+    M = 512;
+    N = 512;
+    K = 512;
+
+    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (512, 512, 512), accuracy:\n");
+    RunAccuracyTestSquare<half, half>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+
+    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (512, 512, 512), accuracy:\n");
+    RunAccuracyTestSquare<half, float>(
+        &prop, 1.0f, 1.0f, M, N, K, 64, 128, 64, 256, 2, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+
+    // Performance tests.
+
+    M = 16384;
+    N = 16384;
+    K = 16384;
+
+    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, half>, (16384, 16384, 16384), [TFLOPS]:\n");
+    RunPerformanceTestSquare<half, half>(
+        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
+
+    printf("\n\n%-30s", "gemm_shmem_tc_async_opt_port, <half, float>, (16384, 16384, 16384), [TFLOPS]:\n");
+    RunPerformanceTestSquare<half, float>(
+        &prop, 1.0f, 1.0f, M, N, K, 128, 128, 64, 256, 1, 4, 1, 3, 2, 8, 4, 8, 2, -1.0f, 1.0f, 0.1f);
 
     return 0;
 }
